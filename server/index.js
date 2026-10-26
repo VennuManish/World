@@ -55,6 +55,10 @@ const SPACECRAFT_MISSIONS = [
   { name: "Cassini", target: "Saturn", displayTarget: "Saturn", status: "Historic Saturn orbiter (2004-2017)", historical: true },
   { name: "Voyager 2", id: "-32", target: "Neptune", encounters: ["Uranus", "Neptune"], displayTarget: "Uranus and Neptune", center: "10", frame: "sun", status: "Outbound; Uranus and Neptune flybys completed" }
 ];
+app.use("/api", (_req, res, next) => {
+  res.set("Cache-Control", "no-store");
+  next();
+});
 function requestHorizons(url) {
   const request = horizonsRequestQueue.then(() => fetch(url, { signal: AbortSignal.timeout(60000) }));
   horizonsRequestQueue = request.then(
@@ -81,6 +85,33 @@ function parseTle(text) {
   }
   return rows;
 }
+function parseOmmJson(payload) {
+  if (!Array.isArray(payload)) throw new Error("CelesTrak returned an invalid OMM JSON response.");
+  const rows = payload.flatMap(record => {
+    const noradId = String(record.NORAD_CAT_ID ?? "").trim();
+    const name = String(record.OBJECT_NAME || record.OBJECT_ID || "").trim();
+    const epoch = Date.parse(record.EPOCH);
+    const fields = ["MEAN_MOTION", "ECCENTRICITY", "INCLINATION", "RA_OF_ASC_NODE", "ARG_OF_PERICENTER", "MEAN_ANOMALY"];
+    const values = Object.fromEntries(fields.map(field => [field, Number(record[field])]));
+    if (!/^\d+$/.test(noradId) || !name || !Number.isFinite(epoch) ||
+      Object.values(values).some(value => !Number.isFinite(value)) ||
+      values.MEAN_MOTION <= 0 || values.ECCENTRICITY < 0 || values.ECCENTRICITY >= 1) return [];
+    const omm = {
+      ...record,
+      NORAD_CAT_ID: Number(noradId),
+      EPOCH: record.EPOCH,
+      ...values,
+      MEAN_MOTION_DOT: Number(record.MEAN_MOTION_DOT) || 0,
+      MEAN_MOTION_DDOT: Number(record.MEAN_MOTION_DDOT) || 0,
+      BSTAR: Number(record.BSTAR) || 0,
+      CLASSIFICATION_TYPE: record.CLASSIFICATION_TYPE || "U",
+      EPHEMERIS_TYPE: Number(record.EPHEMERIS_TYPE) || 0
+    };
+    return [{ name, noradId, omm }];
+  });
+  if (!rows.length) throw new Error("CelesTrak returned no valid OMM records.");
+  return rows;
+}
 function matchesSpaceTrackGroup(record, group) {
   const name = record.name.toUpperCase();
   if (group === "active") return true;
@@ -90,7 +121,7 @@ function matchesSpaceTrackGroup(record, group) {
   if (group === "weather") return /\b(NOAA|GOES|METOP|HIMAWARI|WEATHER|FENGYUN|JPSS)\b/.test(name);
   if (group === "gps-ops") return /\b(GPS|NAVSTAR|GLONASS|GALILEO|BEIDOU|QZSS)\b/.test(name);
   if (group === "geo") {
-    const meanMotion = Number(record.line2.slice(52, 63));
+    const meanMotion = record.omm ? Number(record.omm.MEAN_MOTION) : Number(record.line2.slice(52, 63));
     return Number.isFinite(meanMotion) && meanMotion >= 0.8 && meanMotion <= 1.2;
   }
   if (group === "resource") return /\b(LANDSAT|SENTINEL|AQUA|TERRA|EARTH|RADARSAT|WORLDVIEW|PLEIADES|RESOURCESAT|CARTOSAT)\b/.test(name);
@@ -373,8 +404,10 @@ app.get("/api/satellites", async (req, res) => {
   const provider = String(req.query.provider || "celestrak").toLowerCase();
   if (!["celestrak", "space-track"].includes(provider)) return res.status(400).json({ error: "Unsupported satellite data provider." });
   const providerName = provider === "celestrak" ? "CelesTrak" : "Space-Track";
-  const cacheKey = provider === "celestrak" ? group : `${provider}:${group}`;
+  const cacheKey = provider === "celestrak" ? `celestrak-omm:${group}` : `${provider}:${group}`;
   const cached = readCache.get(cacheKey);
+  const legacyCached = provider === "celestrak" ? readCache.get(group) : null;
+  const fallbackCache = cached || legacyCached;
   const now = Date.now();
   const forceRefresh = req.query.refresh === "true";
   if (forceRefresh) {
@@ -390,28 +423,29 @@ app.get("/api/satellites", async (req, res) => {
   }
   if (!forceRefresh && cached && now - cached.fetched_at < TTL) {
     const satellites = JSON.parse(cached.payload);
-    return res.json({ group, groupName: GROUPS[group], provider, providerName, fetchedAt: new Date(cached.fetched_at).toISOString(), stale: false, source: "sqlite-cache", count: satellites.length, satellites });
+    const format = satellites[0]?.omm ? "OMM" : "TLE";
+    return res.json({ group, groupName: GROUPS[group], provider, providerName, format, fetchedAt: new Date(cached.fetched_at).toISOString(), stale: false, source: "sqlite-cache", count: satellites.length, satellites });
   }
   try {
     let satellites;
     if (provider === "space-track") {
       satellites = await fetchSpaceTrackRecords(group);
     } else {
-      const url = `https://celestrak.org/NORAD/elements/gp.php?GROUP=${encodeURIComponent(group.toUpperCase())}&FORMAT=TLE`;
-      const upstream = await fetch(url, { signal: AbortSignal.timeout(20000), headers: { "User-Agent": "SatelliteTracking/1.0" } });
-      const body = await upstream.text();
-      if (!upstream.ok) throw new Error(`CelesTrak HTTP ${upstream.status}: ${body.slice(0, 160)}`);
-      satellites = parseTle(body);
-      if (!satellites.length) throw new Error("CelesTrak returned no parseable TLE records.");
+      const url = `https://celestrak.org/NORAD/elements/gp.php?GROUP=${encodeURIComponent(group.toUpperCase())}&FORMAT=JSON`;
+      const upstream = await fetch(url, { signal: AbortSignal.timeout(30000), headers: { "Accept": "application/json", "User-Agent": "SatelliteTracking/1.0" } });
+      if (!upstream.ok) throw new Error(`CelesTrak returned HTTP ${upstream.status}.`);
+      satellites = parseOmmJson(await upstream.json());
     }
     const fetchedAt = Date.now();
     writeCache.run(cacheKey, JSON.stringify(satellites), fetchedAt);
-    res.json({ group, groupName: GROUPS[group], provider, providerName, fetchedAt: new Date(fetchedAt).toISOString(), stale: false, source: provider, count: satellites.length, satellites });
+    const format = provider === "celestrak" ? "OMM" : "TLE";
+    res.json({ group, groupName: GROUPS[group], provider, providerName, format, fetchedAt: new Date(fetchedAt).toISOString(), stale: false, source: provider === "celestrak" ? "CelesTrak OMM JSON" : provider, count: satellites.length, satellites });
   } catch (error) {
     console.error(`[${providerName}] ${group}: ${error.message}`);
-    if (cached) {
-      const satellites = JSON.parse(cached.payload);
-      return res.json({ group, groupName: GROUPS[group], provider, providerName, fetchedAt: new Date(cached.fetched_at).toISOString(), stale: true, source: "sqlite-stale-cache", warning: error.message, count: satellites.length, satellites });
+    if (fallbackCache) {
+      const satellites = JSON.parse(fallbackCache.payload);
+      const format = satellites[0]?.omm ? "OMM" : "TLE";
+      return res.json({ group, groupName: GROUPS[group], provider, providerName, format, fetchedAt: new Date(fallbackCache.fetched_at).toISOString(), stale: true, source: "sqlite-stale-cache", warning: error.message, count: satellites.length, satellites });
     }
     res.status(error.statusCode || 502).json({ error: `${providerName} satellite data is unavailable and no provider-specific cached copy exists.`, details: error.message, suggestion: "Check provider availability and server configuration, then retry. Successful data is cached for two hours." });
   }

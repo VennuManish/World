@@ -14,13 +14,15 @@ export async function fetchDataProviders(signal) {
 export async function fetchSatelliteRecords(group, signal, provider = "celestrak", refresh = false) {
   const params = new URLSearchParams({ group, provider });
   if (refresh) params.set("refresh", "true");
-  const response = await fetch(`/api/satellites?${params}`, { signal });
+  const response = await fetch(`/api/satellites?${params}`, { signal, cache: "no-store" });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.details || payload.error || `API error ${response.status}`);
   return payload;
 }
 export function calculateSatellite(record, date = new Date()) {
-  const satrec = satellite.twoline2satrec(record.line1, record.line2);
+  const satrec = record.omm
+    ? satellite.json2satrec(record.omm)
+    : satellite.twoline2satrec(record.line1, record.line2);
   if (satrec.error) return null;
   const p = satellite.propagate(satrec, date);
   if (!p?.position || !p?.velocity || typeof p.position === "boolean" || typeof p.velocity === "boolean") return null;

@@ -1,6 +1,6 @@
 # Satellite Tracking
 
-Features: 3D Earth globe, satellite markers and predicted tracks, search by name/NORAD ID, CelesTrak and Space-Track providers, group selector, LEO/MEO/GEO and altitude filters, telemetry inspector, automatic position recalculation every 15 seconds, CSV export, Express API, and SQLite TLE cache.
+Features: 3D Earth globe, satellite markers and predicted tracks, search by name/NORAD ID, CelesTrak and Space-Track providers, group selector, LEO/MEO/GEO and altitude filters, telemetry inspector, automatic position recalculation every 15 seconds, CSV export, Express API, and SQLite orbital-element cache.
 
 ## Setup on Windows / VS Code
 1. Install a current Node.js LTS version (Vite 8 requires Node 20.19+ or 22.12+).
@@ -20,10 +20,10 @@ The dev command runs Vite and the Express API (port 3001). Test the API at `http
 
 The tracker supports CelesTrak and Space-Track. Choose a provider in the Data provider selector.
 
-- CelesTrak uses its public GP TLE group feeds and does not require an account.
+- CelesTrak uses its public GP OMM JSON group feeds and does not require an account. OMM is passed to `satellite.js` SGP4 and supports catalog numbers beyond the five-digit limit of legacy TLE text.
 - Space-Track requires a registered account. Copy `.env.example` to `.env` and enter your credentials in `.env` as `SPACETRACK_IDENTITY` and `SPACETRACK_PASSWORD`. Restart the server after editing. The `.env` file is ignored by Git; credentials are used only by the Express server and are never sent to the browser.
 - Space-Track returns recent GP TLEs and the server applies group matching for the selected category. Group membership is an approximation based on object names and orbit mean motion; use CelesTrak groups when you need its curated categories.
-- Use **Update data** to ask the selected provider for fresh elements immediately, bypassing the local cache. The app also checks again every two hours. Provider availability, rate limits, or publication schedules may prevent newer elements from being returned; in that case the last successful provider-specific cache remains available and is marked stale.
+- Use **Update data** to ask the selected provider for fresh elements immediately, bypassing the local cache. The app refreshes automatically just over every two hours, and retries in about five minutes when a provider request fails or only stale cached data is available. Provider availability, rate limits, or publication schedules may prevent newer elements from being returned; in that case the last successful provider-specific cache remains available and is marked stale. Automatic refresh runs while the app is open; opening the app also fetches data on startup.
 
 Successful provider/group downloads are cached separately in `server/data/satellite-cache.sqlite` for two hours. A provider never silently uses another provider's cache. If the first download fails, check the `dev:server` terminal for the upstream HTTP/network error. A cache cannot help until that provider has completed one successful download.
 

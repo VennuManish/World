@@ -450,6 +450,7 @@ export default function SolarSystem() {
   const host = useRef(null);
   const satelliteLayer = useRef(null);
   const satelliteRecords = useRef([]);
+  const satelliteRecordsGroup = useRef("");
   const lastSatelliteRefreshRequest = useRef(0);
   const orbitControls = useRef(null);
   const bodyPlanets = useRef(new Map());
@@ -487,6 +488,8 @@ export default function SolarSystem() {
   const [satelliteGroup, setSatelliteGroup] = useState("active");
   const [satelliteStatus, setSatelliteStatus] = useState("Loading CelesTrak data…");
   const [satelliteError, setSatelliteError] = useState("");
+  const [satelliteFormat, setSatelliteFormat] = useState("OMM");
+  const [satelliteStale, setSatelliteStale] = useState(false);
   const [satelliteUpdatedAt, setSatelliteUpdatedAt] = useState(null);
   const [isLoadingSatellites, setIsLoadingSatellites] = useState(false);
   const [satelliteRefresh, setSatelliteRefresh] = useState(0);
@@ -604,8 +607,11 @@ export default function SolarSystem() {
     const controller = new AbortController();
     const forceRefresh = lastSatelliteRefreshRequest.current !== satelliteRefresh;
     lastSatelliteRefreshRequest.current = satelliteRefresh;
-    satelliteRecords.current = [];
-    setRenderedSatelliteCount(0);
+    if (satelliteRecordsGroup.current !== satelliteGroup) {
+      satelliteRecords.current = [];
+      satelliteRecordsGroup.current = satelliteGroup;
+      setRenderedSatelliteCount(0);
+    }
     setIsLoadingSatellites(true);
     setSatelliteError("");
     setSatelliteStatus(satelliteRefresh ? "Refreshing CelesTrak data…" : "Loading CelesTrak data…");
@@ -613,6 +619,9 @@ export default function SolarSystem() {
       .then(data => {
         if (controller.signal.aborted) return;
         satelliteRecords.current = data.satellites;
+        setSatelliteFormat(data.format || "TLE");
+        setSatelliteStale(Boolean(data.stale));
+        setSatelliteError(data.stale ? data.warning || "Using saved satellite data; the latest provider refresh failed." : "");
         setSatelliteUpdatedAt(data.fetchedAt);
         setSatelliteStatus(data.stale
           ? `Using saved ${data.providerName} data`
@@ -631,11 +640,10 @@ export default function SolarSystem() {
   }, [satelliteGroup, satelliteRefresh]);
 
   useEffect(() => {
-    const interval = window.setInterval(() => {
-      setSatelliteRefresh(value => value + 1);
-    }, 2 * 60 * 60 * 1000);
-    return () => window.clearInterval(interval);
-  }, []);
+    const refreshDelay = satelliteError || satelliteStale ? 5 * 60 * 1000 : 2 * 60 * 60 * 1000 + 60 * 1000;
+    const timeout = window.setTimeout(() => setSatelliteRefresh(value => value + 1), refreshDelay);
+    return () => window.clearTimeout(timeout);
+  }, [satelliteError, satelliteStale]);
 
   useEffect(() => {
     if (showNasaEyes || !host.current) return undefined;
@@ -1461,7 +1469,7 @@ export default function SolarSystem() {
           <span className="solar-satellite-status" aria-live="polite">
             {satelliteError ? satelliteError : `${satelliteStatus} · ${renderedSatelliteCount.toLocaleString()} positions updated every 15 sec`}
           </span>
-          {satelliteUpdatedAt && <span className="solar-updated-at">TLE {new Date(satelliteUpdatedAt).toLocaleString()}</span>}
+          {satelliteUpdatedAt && <span className="solar-updated-at">{satelliteFormat} {new Date(satelliteUpdatedAt).toLocaleString()}</span>}
         </div>
         <p className="solar-view-note">Local data view: planet surfaces and moon orbits are illustrative; positions and active spacecraft tracks use JPL Horizons. Historic mission names have no current-position markers. Planet sizes, distances, and orbit guides are not to scale. Up to 2,500 CelesTrak satellites can be displayed around Earth.</p>
         </>}
