@@ -453,7 +453,7 @@ app.get("/api/satellites", async (req, res) => {
 const dist = path.resolve(here, "../dist");
 app.use(express.static(dist));
 app.get("/", (_req, res, next) => res.sendFile(path.join(dist, "index.html"), err => err && next()));
-const HOST = process.env.HOST || "127.0.0.1";
+const HOST = process.env.HOST || (process.env.PORT ? "0.0.0.0" : "127.0.0.1");
 export default app;
 
 if (process.env.VERCEL !== "1") {
