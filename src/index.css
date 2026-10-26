@@ -1,0 +1,682 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap');
+
+:root {
+  font-family: Manrope, Arial, sans-serif;
+  color: #e9f2fb;
+  background: #05090e;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  --panel: #0b121b;
+  --panel-raised: #101a25;
+  --line: rgba(155, 180, 205, .13);
+  --muted: #8293a5;
+  --cyan: #71e6d1;
+  --mono: 'DM Mono', monospace;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background:
+    radial-gradient(ellipse at 50% -25%, rgba(28, 68, 86, .27), transparent 54%),
+    linear-gradient(180deg, #070c12, #05090e 60%);
+}
+button, input, select { font: inherit; }
+button { cursor: pointer; }
+button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+.app-shell { max-width: 1760px; margin: auto; padding: 0 38px 30px; }
+.topbar {
+  height: 76px;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: center; gap: 12px; color: inherit; text-decoration: none; width: fit-content; }
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border: 1px solid rgba(113, 230, 209, .56);
+  border-radius: 11px;
+  background: linear-gradient(145deg, rgba(113, 230, 209, .2), rgba(24, 52, 61, .55));
+  box-shadow: inset 0 0 18px rgba(113, 230, 209, .08), 0 0 24px rgba(113, 230, 209, .06);
+  color: var(--cyan);
+  font-size: 23px;
+  font-weight: 800;
+}
+.brand strong { display: block; letter-spacing: .14em; font-size: 13px; }
+.brand strong span, .hero h1 span { color: var(--cyan); }
+.brand small { display: block; margin-top: 4px; color: #718193; font: 8px var(--mono); letter-spacing: .13em; }
+.topbar-center, .topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: #98a7b5;
+  font: 9px var(--mono);
+  letter-spacing: .1em;
+}
+.topbar-center { color: #718395; }
+.nav-indicator { width: 5px; height: 5px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 9px var(--cyan); }
+.topbar-right { justify-self: end; }
+.topbar-divider, .hero-chip-divider { height: 14px; width: 1px; background: var(--line); margin: 0 4px; }
+.live-dot, .status-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 11px rgba(113, 230, 209, .6);
+}
+.hero {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 24px;
+  padding: 42px 0 30px;
+}
+.eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 13px;
+  color: var(--cyan);
+  font: 9px var(--mono);
+  letter-spacing: .17em;
+}
+.eyebrow-line { width: 18px; height: 1px; background: var(--cyan); }
+.hero-version { margin-left: 5px; color: #647687; }
+.hero h1 { margin: 0; font-size: clamp(34px, 5vw, 58px); line-height: 1.08; letter-spacing: -.055em; font-weight: 600; }
+.hero-copy-block { max-width: 730px; }
+.hero-copy { margin: 13px 0 0; max-width: 620px; color: #91a0ae; font-size: 13px; line-height: 1.8; }
+.hero-chip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  white-space: nowrap;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: rgba(12, 20, 28, .74);
+  color: #a5b2be;
+  font: 9px var(--mono);
+  letter-spacing: .08em;
+}
+.tracker {
+  overflow: hidden;
+  border: 1px solid rgba(156, 184, 208, .17);
+  border-radius: 9px;
+  background: rgba(9, 15, 22, .96);
+  box-shadow: 0 24px 85px rgba(0, 0, 0, .34), 0 0 50px rgba(39, 101, 111, .035);
+}
+.section-heading, .table-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 18px;
+  padding: 20px 24px 17px;
+}
+.section-heading .eyebrow { margin-bottom: 8px; }
+.section-heading h2 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -.02em; }
+.muted { color: var(--muted); }
+.section-heading .muted { margin: 7px 0 0; font-size: 11px; }
+.status-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: #a1b0bc;
+  font: 9px var(--mono);
+  letter-spacing: .06em;
+}
+.error-dot { background: #fb7185; }
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+  padding: 16px 24px;
+  border-block: 1px solid var(--line);
+  background: #0b131c;
+}
+.field { display: flex; flex: 1; flex-direction: column; gap: 7px; min-width: 155px; }
+.field > span, .field label > span {
+  color: #8293a3;
+  font: 9px var(--mono);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.field input, .field select, .filter-row input, .filter-row select {
+  width: 100%;
+  min-height: 39px;
+  padding: 0 11px;
+  border: 1px solid #2a3947;
+  border-radius: 4px;
+  background: #0d1822;
+  color: #e6eff7;
+  outline: none;
+}
+.field input:focus, .field select:focus, .filter-row input:focus, .filter-row select:focus {
+  border-color: rgba(113, 230, 209, .75);
+  box-shadow: 0 0 0 2px rgba(113, 230, 209, .1);
+}
+.search-field { position: relative; z-index: 5; flex: 1.7; min-width: 230px; }
+.search-control { display: flex; position: relative; }
+.search-control input {
+  min-height: 44px;
+  padding: 0 42px;
+  border-color: rgba(113, 230, 209, .36);
+  background: linear-gradient(110deg, #10212b, #0d1822);
+  font-size: 12px;
+  transition: border-color .18s, box-shadow .18s;
+}
+.search-control input:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(113, 230, 209, .1); }
+.search-control input::placeholder { color: #718395; }
+.search-icon {
+  position: absolute;
+  z-index: 1;
+  left: 15px;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid var(--cyan);
+  border-radius: 50%;
+  transform: translateY(-60%);
+  pointer-events: none;
+}
+.search-icon:after {
+  position: absolute;
+  right: -5px;
+  bottom: -3px;
+  width: 6px;
+  height: 1.5px;
+  border-radius: 2px;
+  background: var(--cyan);
+  content: "";
+  transform: rotate(45deg);
+}
+.search-clear {
+  position: absolute;
+  top: 50%;
+  right: 7px;
+  width: 28px;
+  height: 28px;
+  transform: translateY(-50%);
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #8293a5;
+  font-size: 20px;
+  line-height: 1;
+}
+.search-clear:hover { background: #1a2d3a; color: #e8f2ff; }
+.search-summary { min-height: 12px; color: #788999; font: 9px var(--mono); }
+.search-results {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  right: 0;
+  left: 0;
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 5px;
+  border: 1px solid rgba(113, 230, 209, .35);
+  border-radius: 5px;
+  background: #0a121a;
+  box-shadow: 0 16px 40px #000b;
+}
+.search-result {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 11px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: #e8f2ff;
+  text-align: left;
+}
+.search-result:hover, .search-result.active, .search-result[aria-selected=true] { background: #142935; }
+.search-result-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.search-result-main b { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.search-result-main small { color: #8293a5; font: 9px var(--mono); }
+.search-result-orbit { font: 9px var(--mono); }
+.search-no-results { padding: 14px 11px; color: #8293a5; font-size: 11px; }
+.button {
+  min-height: 39px;
+  padding: 0 14px;
+  border: 1px solid rgba(113, 230, 209, .4);
+  border-radius: 4px;
+  background: rgba(44, 109, 106, .2);
+  color: #baf5e9;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  transition: background .15s, border-color .15s;
+}
+.button:hover:not(:disabled) { border-color: var(--cyan); background: rgba(44, 109, 106, .35); }
+.button:disabled { cursor: not-allowed; opacity: .4; }
+.toolbar-actions { display: flex; gap: 8px; }
+.refresh-button { border-color: rgba(119, 190, 255, .42); background: rgba(46, 97, 145, .19); color: #c5e4ff; }
+.refresh-button:hover:not(:disabled) { border-color: #80bdff; background: rgba(46, 97, 145, .34); }
+.filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 13px;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(10, 17, 25, .8);
+  font-size: 11px;
+}
+.filter-row strong { padding-bottom: 10px; color: #c4d0da; font-size: 10px; }
+.filter-row small { color: var(--muted); font-weight: 400; }
+.filter-row label { display: flex; flex-direction: column; gap: 5px; color: var(--muted); font: 9px var(--mono); }
+.filter-row input, .filter-row select { width: 116px; min-height: 32px; font: 11px Manrope, Arial; }
+.link-button { padding: 6px; border: 0; background: transparent; color: var(--cyan); font-size: 10px; font-weight: 700; }
+.link-button:hover { color: #b8fff0; text-decoration: underline; }
+.error-panel {
+  margin: 18px 24px;
+  padding: 15px;
+  border: 1px solid #8e3949;
+  border-radius: 5px;
+  background: #35141c77;
+  color: #ffd7df;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.error-panel p { color: #d6aeb8; }
+.error-panel code { overflow-wrap: anywhere; }
+.provider-note { margin: 10px 24px 0; color: #98abb9; font-size: 10px; line-height: 1.65; }
+.provider-note code { color: var(--cyan); font: 9px var(--mono); }
+.provider-note.warning { color: #fbbf24; }
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  border-bottom: 1px solid var(--line);
+  background: var(--line);
+}
+.metric-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 16px 20px;
+  border-top: 1px solid rgba(255, 255, 255, .025);
+  background: #0b141d;
+}
+.metric-card span, .metric-card small { color: #8293a5; font: 9px var(--mono); }
+.metric-card b { overflow-wrap: anywhere; color: #edf5fb; font-size: 22px; font-weight: 600; letter-spacing: -.03em; }
+.globe-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.8fr) minmax(300px, .8fr);
+  gap: 1px;
+  border-bottom: 1px solid var(--line);
+  background: var(--line);
+}
+.globe-panel, .telemetry-panel { min-width: 0; background: #070e15; }
+.globe-panel-top, .globe-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 9px;
+  padding: 12px 17px;
+  color: #8293a5;
+  font: 9px var(--mono);
+}
+.globe-panel-top { border-bottom: 1px solid rgba(255, 255, 255, .045); }
+.globe-legend { white-space: nowrap; }
+.globe-source { margin-left: auto; }
+.globe-actions { display: flex; gap: 6px; }
+.globe-control {
+  min-height: 27px;
+  padding: 0 9px;
+  border: 1px solid rgba(155, 180, 205, .19);
+  border-radius: 3px;
+  background: rgba(17, 29, 40, .8);
+  color: #a9bac8;
+  font: 8px var(--mono);
+  white-space: nowrap;
+}
+.globe-control:hover, .globe-control[aria-pressed=true] {
+  border-color: rgba(113, 230, 209, .5);
+  color: var(--cyan);
+}
+.legend { display: inline-block; width: 6px; height: 6px; margin: 0 5px 0 10px; border-radius: 50%; }
+.legend.leo { background: #2dd4bf; box-shadow: 0 0 8px #2dd4bf66; }
+.legend.meo { background: #fbbf24; box-shadow: 0 0 8px #fbbf2466; }
+.legend.geo { background: #a78bfa; box-shadow: 0 0 8px #a78bfa66; }
+.globe-container { height: 520px; overflow: hidden; }
+.globe-container canvas { display: block; max-width: 100%; }
+.globe-foot { border-top: 1px solid rgba(255, 255, 255, .045); color: #758697; }
+.telemetry-panel {
+  display: flex;
+  flex-direction: column;
+  padding: 20px;
+  border-left: 1px solid var(--line);
+}
+.telemetry-panel .eyebrow { margin-bottom: 8px; }
+.telemetry-panel h3, .table-header h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.selected-name { overflow-wrap: anywhere; margin: 22px 0 4px; font-size: 18px; font-weight: 600; }
+.telemetry-panel .muted { font-size: 10px; }
+.orbit-badge { align-self: start; padding: 5px 8px; border: 1px solid currentColor; border-radius: 3px; font: 9px var(--mono); }
+.telemetry-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  margin-top: 16px;
+  border: 1px solid var(--line);
+  background: var(--line);
+}
+.datum { display: flex; flex-direction: column; gap: 7px; min-width: 0; padding: 10px; background: #0c151e; }
+.datum small { color: #7b8d9e; font: 8px var(--mono); text-transform: uppercase; }
+.datum b { overflow-wrap: anywhere; font-size: 11px; font-weight: 600; }
+.focus-button { width: 100%; margin-top: 13px; }
+.empty-selection { display: flex; flex-direction: column; align-items: center; padding: 44px 10px; color: var(--muted); text-align: center; font-size: 11px; }
+.empty-selection div { color: var(--cyan); font-size: 42px; }
+.empty-selection b { color: #e8f2ff; }
+.source-box { display: flex; flex-direction: column; gap: 7px; margin-top: auto; padding-top: 20px; font-size: 10px; }
+.source-box small { color: #68829b; font: 8px var(--mono); letter-spacing: .1em; }
+.source-box a { color: #dce8f2; text-decoration: none; }
+.source-box a:hover { color: var(--cyan); }
+.source-box span { overflow-wrap: anywhere; color: var(--muted); }
+.warning { color: #fbbf24 !important; }
+.table-panel { background: #090f16; }
+.table-header { align-items: end; padding: 20px 24px 14px; }
+.table-header .eyebrow { margin-bottom: 7px; }
+.table-header span { color: var(--muted); font: 9px var(--mono); }
+.table-scroll { overflow-x: auto; max-height: 640px; }
+table { width: 100%; border-collapse: collapse; text-align: left; white-space: nowrap; }
+thead { position: sticky; top: 0; z-index: 1; background: #101923; }
+th { padding: 11px 15px; border-block: 1px solid var(--line); color: #8293a5; font: 8px var(--mono); text-transform: uppercase; letter-spacing: .08em; }
+td { padding: 11px 15px; border-bottom: 1px solid rgba(155, 180, 205, .08); color: #b5c4d1; font-size: 10px; font-variant-numeric: tabular-nums; }
+tbody tr { transition: background .15s; }
+tbody tr:hover, tbody tr.selected-row { background: #10242d; }
+.sat-name { overflow: hidden; max-width: 270px; color: #e6f2ff; font-weight: 700; text-overflow: ellipsis; }
+.empty-table { padding: 28px; color: var(--muted); text-align: center; }
+.table-more { display: flex; justify-content: center; padding: 15px; border-top: 1px solid var(--line); }
+.table-more .button { min-width: 190px; }
+.disclaimer { margin: 0; padding: 14px 24px 18px; color: #758697; font-size: 9px; line-height: 1.7; }
+.footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  padding-top: 17px;
+  color: #647588;
+  font: 8px var(--mono);
+  letter-spacing: .06em;
+  line-height: 1.7;
+}
+.solar-system { margin-top: 24px; }
+.solar-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.8fr) minmax(280px, .8fr);
+  gap: 1px;
+  border-top: 1px solid var(--line);
+  background: var(--line);
+}
+.solar-view, .solar-inspector { min-width: 0; background: #070e15; }
+.solar-view-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, .045);
+  color: #8396a8;
+  font: 8px var(--mono);
+  letter-spacing: .08em;
+}
+.solar-view-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.solar-view-actions .globe-control { min-height: 25px; }
+.solar-view-actions .globe-control[aria-pressed=true] { border-color: rgba(113, 230, 209, .5); background: #10242d; color: var(--cyan); }
+.solar-sun-key, .solar-orbit-key {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 5px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+.solar-sun-key { background: #ffc65c; box-shadow: 0 0 9px #ffc65c99; }
+.solar-orbit-key { border: 1px solid #7797ad; }
+.solar-satellite-key { display: inline-block; width: 6px; height: 6px; margin-right: 5px; border-radius: 50%; background: #2dd4bf; box-shadow: 0 0 8px #2dd4bf99; vertical-align: middle; }
+.solar-key-divider { margin: 0 10px; color: #405668; }
+.solar-canvas { height: 540px; overflow: hidden; cursor: grab; }
+.nasa-eyes-frame {
+  position: relative;
+  height: min(76vh, 820px);
+  min-height: 620px;
+  overflow: hidden;
+  background: #000;
+}
+.nasa-eyes-frame iframe { display: block; width: 100%; height: 100%; border: 0; background: #000; }
+.solar-canvas:active { cursor: grabbing; }
+.solar-canvas canvas { display: block; width: 100%; height: 100%; }
+.planet-simulation { padding: 12px 18px; border-top: 1px solid rgba(255, 255, 255, .045); background: #09121b; }
+.planet-simulation-actions { display: flex; align-items: end; flex-wrap: wrap; gap: 9px; }
+.planet-speed { display: flex; flex-direction: column; gap: 5px; min-width: 150px; }
+.planet-speed span, .planet-timeline > span { color: #8293a5; font: 8px var(--mono); letter-spacing: .06em; }
+.planet-speed select {
+  min-height: 34px;
+  padding: 0 9px;
+  border: 1px solid #2a3947;
+  border-radius: 4px;
+  background: #0d1822;
+  color: #e6eff7;
+  font-size: 10px;
+}
+.planet-refresh { min-height: 34px; }
+.planet-data-status { flex: 1 1 260px; color: #91a0ae; font-size: 9px; line-height: 1.5; }
+.planet-data-status:empty { display: none; }
+.planet-timeline { display: grid; grid-template-columns: auto minmax(100px, 1fr) auto; align-items: center; gap: 12px; margin-top: 13px; }
+.planet-timeline input { width: 100%; accent-color: var(--cyan); }
+.planet-timeline b { min-width: 120px; color: #c5d3df; text-align: right; font: 9px var(--mono); }
+.spacecraft-panel { padding: 13px 18px; border-top: 1px solid rgba(255, 255, 255, .045); background: #08111a; }
+.spacecraft-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.spacecraft-panel-heading > div { display: flex; flex-direction: column; gap: 5px; }
+.spacecraft-panel-heading span { color: #b6c8d7; font: 8px var(--mono); letter-spacing: .09em; }
+.spacecraft-panel-heading small, .spacecraft-status { color: #8191a0; font: 8px var(--mono); }
+.spacecraft-panel-heading .globe-control { min-height: 27px; }
+.spacecraft-status { margin: 10px 0 0; line-height: 1.55; }
+.spacecraft-status.error { color: #ff9da9; }
+.spacecraft-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; margin-top: 10px; }
+.spacecraft-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 48px;
+  padding: 8px 10px;
+  border: 1px solid rgba(155, 180, 205, .13);
+  border-radius: 4px;
+  background: #0c1721;
+  color: #d8e3eb;
+  text-align: left;
+}
+.spacecraft-card:hover, .spacecraft-card.selected { border-color: color-mix(in srgb, var(--mission-color), transparent 35%); background: #12212d; }
+.spacecraft-card:disabled { cursor: default; opacity: .72; }
+.spacecraft-card.historical { border-style: dashed; }
+.mission-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--mission-color); box-shadow: 0 0 9px var(--mission-color); }
+.spacecraft-card > span { display: flex; flex: 1; flex-direction: column; gap: 4px; min-width: 0; }
+.spacecraft-card b { overflow: hidden; color: var(--mission-color); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.spacecraft-card small { overflow: hidden; color: #8798a7; font: 8px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.spacecraft-empty { margin: 9px 0 0; color: #8798a7; font-size: 9px; line-height: 1.6; }
+.solar-satellite-controls {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 18px;
+  border-top: 1px solid rgba(255, 255, 255, .045);
+  background: #09121b;
+}
+.solar-group-field { display: flex; flex-direction: column; gap: 5px; min-width: 190px; }
+.solar-group-field span, .solar-updated-at { color: #8293a5; font: 8px var(--mono); letter-spacing: .06em; }
+.solar-group-field select {
+  min-height: 34px;
+  padding: 0 9px;
+  border: 1px solid #2a3947;
+  border-radius: 4px;
+  background: #0d1822;
+  color: #e6eff7;
+  font-size: 10px;
+}
+.solar-refresh { min-height: 34px; }
+.solar-satellite-status { flex: 1 1 240px; color: #91a0ae; font-size: 9px; line-height: 1.5; }
+.solar-view-note { margin: 0; padding: 11px 18px; border-top: 1px solid rgba(255, 255, 255, .045); color: #758697; font-size: 9px; }
+.solar-inspector { display: flex; flex-direction: column; padding: 22px; border-left: 1px solid var(--line); }
+.solar-inspector .eyebrow { margin-bottom: 8px; }
+.solar-inspector h3 { margin: 0; font-size: 22px; font-weight: 600; }
+.solar-body-type { margin: 5px 0 0; color: #91a0ae; font: 9px var(--mono); }
+.solar-description { margin: 19px 0; color: #9baab7; font-size: 11px; line-height: 1.7; }
+.nasa-gallery-heading { display: flex; flex-direction: column; gap: 5px; margin: 0 0 8px; color: #c6d5df; font: 8px var(--mono); letter-spacing: .08em; }
+.nasa-gallery-heading small { color: #718395; font: 7px var(--mono); }
+.nasa-imagery { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; margin: 0 0 16px; }
+.nasa-imagery.has-moon-image { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.nasa-image-card { min-width: 0; margin: 0; overflow: hidden; border: 1px solid rgba(155, 180, 205, .15); border-radius: 5px; background: #07111b; }
+.nasa-image-link { position: relative; display: block; overflow: hidden; aspect-ratio: 1.65; background: radial-gradient(ellipse at center, #162a38, #05090e 76%); }
+.nasa-image-link img { display: block; width: 100%; height: 100%; object-fit: cover; transition: transform .35s ease; }
+.nasa-image-link:hover img { transform: scale(1.045); }
+.nasa-image-open { position: absolute; right: 6px; bottom: 6px; padding: 4px 6px; border: 1px solid rgba(190, 220, 241, .25); border-radius: 3px; background: rgba(3, 9, 15, .78); color: #d6e7f2; font: 7px var(--mono); letter-spacing: .05em; opacity: 0; transition: opacity .15s; }
+.nasa-image-link:hover .nasa-image-open, .nasa-image-link:focus-visible .nasa-image-open { opacity: 1; }
+.nasa-image-card figcaption { display: flex; flex-direction: column; gap: 4px; min-height: 43px; padding: 7px 8px; }
+.nasa-image-card figcaption span { overflow: hidden; color: #c5d3de; font-size: 8px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.nasa-image-card figcaption small { overflow: hidden; color: #718395; font: 7px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.nasa-image-fallback { display: grid; place-items: center; min-height: 100px; padding: 12px; background: #0d1822; color: var(--cyan); font-size: 9px; text-align: center; text-decoration: none; }
+.nasa-image-fallback:hover { color: #d8fff6; text-decoration: underline; }
+.nasa-gallery-controls { display: flex; align-items: center; justify-content: space-between; padding: 4px 7px; border-top: 1px solid rgba(155, 180, 205, .1); color: #8293a5; font: 8px var(--mono); }
+.nasa-gallery-controls button { display: grid; place-items: center; width: 25px; height: 23px; border: 1px solid rgba(155, 180, 205, .16); border-radius: 3px; background: #0c1721; color: #d4e3ed; }
+.nasa-gallery-controls button:hover:not(:disabled) { border-color: var(--cyan); color: var(--cyan); }
+.nasa-gallery-controls button:disabled { cursor: default; opacity: .35; }
+.nasa-gallery-credit { margin: -8px 0 15px; color: #6f8190; font-size: 8px; line-height: 1.5; }
+.nasa-gallery-credit a { color: #91c8c0; text-decoration: none; }
+.nasa-gallery-credit a:hover { text-decoration: underline; }
+.solar-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; border: 1px solid var(--line); background: var(--line); }
+.solar-facts div { display: flex; flex-direction: column; gap: 7px; min-width: 0; padding: 11px; background: #0c151e; }
+.solar-facts div:last-child { grid-column: 1 / -1; }
+.solar-facts small { color: #7b8d9e; font: 8px var(--mono); }
+.solar-facts b { overflow-wrap: anywhere; font-size: 11px; font-weight: 600; }
+.planet-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 20px; }
+.planet-selection { padding: 12px 18px; border-bottom: 1px solid var(--line); background: #09121b; }
+.planet-selection-label { margin: 0 0 9px; color: #aebdca; font: 8px var(--mono); letter-spacing: .09em; }
+.planet-selection-label span { color: #718395; }
+.planet-selection .planet-picker { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 0; }
+.planet-button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 9px;
+  border: 1px solid rgba(155, 180, 205, .12);
+  border-radius: 4px;
+  background: #0b141d;
+  color: #9baab7;
+  text-align: left;
+  font-size: 10px;
+}
+.planet-button:hover, .planet-button.selected { border-color: rgba(113, 230, 209, .45); background: #10242d; color: #e8f2ff; }
+.planet-dot { width: 9px; height: 9px; flex: 0 0 auto; border-radius: 50%; background: var(--planet-color); box-shadow: 0 0 8px color-mix(in srgb, var(--planet-color), transparent 45%); }
+.moon-picker { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.moon-picker-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 9px; color: #8293a5; font: 8px var(--mono); letter-spacing: .08em; }
+.moon-picker-heading .globe-control { min-height: 25px; }
+.moon-list { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; max-height: 224px; overflow-y: auto; }
+.moon-button {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  min-height: 33px;
+  padding: 0 8px;
+  border: 1px solid rgba(155, 180, 205, .12);
+  border-radius: 4px;
+  background: #0b141d;
+  color: #aebbc6;
+  text-align: left;
+  font-size: 9px;
+}
+.moon-button:hover, .moon-button.selected { border-color: rgba(174, 198, 220, .48); background: #142330; color: #f1f6fa; }
+.moon-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--moon-color); box-shadow: 0 0 7px color-mix(in srgb, var(--moon-color), transparent 40%); }
+.moon-button small { margin-left: auto; color: #8191a0; font: 8px var(--mono); white-space: nowrap; }
+.moon-empty { margin: 0; padding: 11px; border: 1px solid var(--line); color: #8797a6; font-size: 10px; line-height: 1.6; }
+.mars-moon-profile { margin-top: 16px; padding: 14px; border: 1px solid rgba(255, 120, 93, .25); border-radius: 5px; background: linear-gradient(145deg, rgba(71, 35, 31, .32), rgba(10, 19, 28, .72)); }
+.mars-moon-profile .eyebrow { margin: 0 0 7px; color: #ff9c80; font-size: 8px; }
+.mars-moon-profile h4 { margin: 0; color: #f3d6cc; font-size: 15px; }
+.mars-moon-profile > p:not(.eyebrow) { margin: 8px 0 12px; color: #a9b5bf; font-size: 10px; line-height: 1.65; }
+.mars-moon-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; border: 1px solid var(--line); background: var(--line); }
+.mars-moon-facts div { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 8px; background: #0c151e; }
+.mars-moon-facts small { color: #8293a5; font: 7px var(--mono); }
+.mars-moon-facts b { color: #e8f2fb; font-size: 9px; }
+
+@media (max-width: 1050px) {
+  .app-shell { padding-inline: 20px; }
+  .globe-layout { grid-template-columns: 1fr; }
+  .solar-layout { grid-template-columns: 1fr; }
+  .telemetry-panel { border-top: 1px solid var(--line); border-left: 0; }
+  .solar-inspector { border-top: 1px solid var(--line); border-left: 0; }
+  .planet-selection .planet-picker { margin-top: 0; }
+  .metrics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .source-box { margin-top: 20px; }
+}
+@media (max-width: 650px) {
+  .app-shell { padding: 0 12px 22px; }
+  .topbar { height: 64px; grid-template-columns: 1fr auto; }
+  .topbar-center { display: none; }
+  .topbar-right { font-size: 8px; }
+  .topbar-divider, .topbar-right { letter-spacing: .03em; }
+  .hero { align-items: start; flex-direction: column; gap: 16px; padding: 30px 0 22px; }
+  .hero h1 { font-size: clamp(34px, 10vw, 46px); }
+  .hero-copy { font-size: 12px; }
+  .hero-chip { white-space: normal; font-size: 8px; }
+  .section-heading { align-items: start; flex-direction: column; padding: 17px; }
+  .toolbar, .filter-row { padding: 13px; }
+  .provider-note { margin-inline: 14px; }
+  .field, .search-field { min-width: 100%; }
+  .toolbar-actions { width: 100%; }
+  .toolbar-actions .button { flex: 1; }
+  .filter-row { align-items: center; }
+  .filter-row strong { width: 100%; padding: 0; }
+  .metrics-grid { grid-template-columns: 1fr 1fr; }
+  .metric-card { padding: 12px; }
+  .metric-card b { font-size: 19px; }
+  .globe-container { height: 390px; }
+  .solar-canvas { height: 390px; }
+  .nasa-eyes-frame { height: 70vh; min-height: 500px; }
+  .solar-view-top { font-size: 7px; }
+  .solar-view-actions { width: 100%; }
+  .solar-view-actions .globe-control { flex: 1; }
+  .planet-selection { padding: 11px 13px; }
+  .planet-selection .planet-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .planet-simulation { padding: 12px; }
+  .planet-simulation-actions > .button, .planet-refresh { flex: 1; }
+  .planet-speed { flex: 1; }
+  .planet-timeline { grid-template-columns: 1fr auto; gap: 6px 10px; }
+  .planet-timeline > span { grid-column: 1 / -1; }
+  .planet-timeline input { grid-column: 1 / 2; }
+  .planet-timeline b { min-width: 0; }
+  .spacecraft-panel { padding: 12px; }
+  .spacecraft-panel-heading { align-items: flex-start; flex-direction: column; }
+  .spacecraft-list { grid-template-columns: 1fr; }
+  .solar-group-field { flex: 1 1 100%; }
+  .solar-refresh { flex: 1; }
+  .mars-moon-facts { grid-template-columns: 1fr; }
+  .globe-panel-top { justify-content: flex-start; }
+  .globe-source { margin-left: auto; }
+  .globe-actions { width: 100%; }
+  .telemetry-panel { padding: 16px; }
+  .table-header { align-items: start; flex-direction: column; padding: 17px; }
+  .footer { flex-direction: column; }
+}

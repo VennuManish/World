@@ -1,0 +1,27 @@
+{
+  "name": "satellite-tracking-pro",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "node --env-file-if-exists=.env server/index.js",
+    "dev:client": "vite",
+    "build": "vite build",
+    "start": "node --env-file-if-exists=.env server/index.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.2.0",
+    "express": "^5.1.0",
+    "globe.gl": "^2.45.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "satellite.js": "^6.0.1",
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.0.4",
+    "concurrently": "^9.2.1",
+    "vite": "^8.3.4"
+  }
+}
