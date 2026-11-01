@@ -486,8 +486,9 @@ export default function SolarSystem() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [simulationSpeed, setSimulationSpeed] = useState(1);
   const [satelliteGroup, setSatelliteGroup] = useState("active");
-  const [satelliteStatus, setSatelliteStatus] = useState("Loading CelesTrak data…");
+  const [satelliteStatus, setSatelliteStatus] = useState("Loading Space-Track data…");
   const [satelliteError, setSatelliteError] = useState("");
+  const [satelliteWarning, setSatelliteWarning] = useState("");
   const [satelliteFormat, setSatelliteFormat] = useState("OMM");
   const [satelliteStale, setSatelliteStale] = useState(false);
   const [satelliteUpdatedAt, setSatelliteUpdatedAt] = useState(null);
@@ -614,13 +615,15 @@ export default function SolarSystem() {
     }
     setIsLoadingSatellites(true);
     setSatelliteError("");
-    setSatelliteStatus(satelliteRefresh ? "Refreshing CelesTrak data…" : "Loading CelesTrak data…");
-    fetchSatelliteRecords(satelliteGroup, controller.signal, "celestrak", forceRefresh)
+    setSatelliteWarning("");
+    setSatelliteStatus(satelliteRefresh ? "Refreshing Space-Track data…" : "Loading Space-Track data…");
+    fetchSatelliteRecords(satelliteGroup, controller.signal, "space-track", forceRefresh)
       .then(data => {
         if (controller.signal.aborted) return;
         satelliteRecords.current = data.satellites;
         setSatelliteFormat(data.format || "TLE");
         setSatelliteStale(Boolean(data.stale));
+        setSatelliteWarning(data.stale ? "" : data.warning || "");
         setSatelliteError(data.stale ? data.warning || "Using saved satellite data; the latest provider refresh failed." : "");
         setSatelliteUpdatedAt(data.fetchedAt);
         setSatelliteStatus(data.stale
@@ -629,8 +632,8 @@ export default function SolarSystem() {
       })
       .catch(error => {
         if (error.name !== "AbortError") {
-          setSatelliteError(error.message || "Unable to load CelesTrak data.");
-          setSatelliteStatus("CelesTrak data unavailable");
+          setSatelliteError(error.message || "Unable to load Space-Track data.");
+          setSatelliteStatus("Space-Track data unavailable");
         }
       })
       .finally(() => {
@@ -1190,7 +1193,7 @@ export default function SolarSystem() {
           colors.setXYZ(count, ((color >> 16) & 255) / 255, ((color >> 8) & 255) / 255, (color & 255) / 255);
           count += 1;
         } catch (error) {
-          console.error(`Unable to calculate CelesTrak satellite ${record.noradId}:`, error);
+          console.error(`Unable to calculate Space-Track satellite ${record.noradId}:`, error);
         }
       }
       positions.needsUpdate = true;
@@ -1458,20 +1461,20 @@ export default function SolarSystem() {
         </div>
         <div className="solar-satellite-controls">
           <label className="solar-group-field" htmlFor="solar-satellite-group">
-            <span>CELESTRAK SATELLITE GROUP</span>
+            <span>SPACE-TRACK SATELLITE GROUP</span>
             <select id="solar-satellite-group" value={satelliteGroup} onChange={event => setSatelliteGroup(event.target.value)}>
               {GROUPS.map(group => <option key={group.id} value={group.id}>{group.name}</option>)}
             </select>
           </label>
           <button type="button" className="button refresh-button solar-refresh" disabled={isLoadingSatellites} onClick={() => setSatelliteRefresh(value => value + 1)}>
-            {isLoadingSatellites ? "Updating…" : "↻ Update CelesTrak"}
+            {isLoadingSatellites ? "Updating…" : "↻ Update Space-Track"}
           </button>
           <span className="solar-satellite-status" aria-live="polite">
-            {satelliteError ? satelliteError : `${satelliteStatus} · ${renderedSatelliteCount.toLocaleString()} positions updated every 15 sec`}
+            {satelliteError ? satelliteError : `${satelliteStatus}${satelliteWarning ? ` · ${satelliteWarning}` : ""} · ${renderedSatelliteCount.toLocaleString()} positions updated every 15 sec`}
           </span>
           {satelliteUpdatedAt && <span className="solar-updated-at">{satelliteFormat} {new Date(satelliteUpdatedAt).toLocaleString()}</span>}
         </div>
-        <p className="solar-view-note">Local data view: planet surfaces and moon orbits are illustrative; positions and active spacecraft tracks use JPL Horizons. Historic mission names have no current-position markers. Planet sizes, distances, and orbit guides are not to scale. Up to 2,500 CelesTrak satellites can be displayed around Earth.</p>
+        <p className="solar-view-note">Local data view: planet surfaces and moon orbits are illustrative; positions and active spacecraft tracks use JPL Horizons. Historic mission names have no current-position markers. Planet sizes, distances, and orbit guides are not to scale. Up to 2,500 satellites can be displayed around Earth.</p>
         </>}
       </div>
       <aside className="solar-inspector" aria-live="polite">

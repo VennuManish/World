@@ -29,8 +29,10 @@ const PLANET_EPHEMERIS_TTL = 30 * 60 * 1000;
 const FORCE_REFRESH_COOLDOWN = 60 * 1000;
 const forcedRefreshes = new Map();
 const SPACE_TRACK_URL = "https://www.space-track.org";
+const TLE_API_URL = "https://tle.ivanstanojevic.me/api/tle";
 const HORIZONS_URL = "https://ssd.jpl.nasa.gov/api/horizons.api";
 let horizonsRequestQueue = Promise.resolve();
+let celestrakBlockedUntil = 0;
 const PLANETS = [
   { name: "Mercury", id: "199" },
   { name: "Venus", id: "299" },
@@ -69,7 +71,21 @@ function requestHorizons(url) {
 }
 const GROUPS = {
   stations: "Space stations", active: "Active satellites", starlink: "Starlink", oneweb: "OneWeb",
-  weather: "Weather", "gps-ops": "GPS operational", geo: "Geostationary", resource: "Earth observation"
+  weather: "Weather", "gps-ops": "GPS operational", geo: "Geostationary", resource: "Earth observation",
+  communications: "Communications", scientific: "Science missions", payload: "Payloads",
+  "rocket-body": "Rocket bodies", debris: "Debris"
+};
+const TLE_API_SEARCHES = {
+  stations: ["ISS", "TIANGONG", "TIANHE", "WENTIAN", "MENGTIAN", "CSS"],
+  starlink: ["STARLINK"],
+  oneweb: ["ONEWEB"],
+  weather: ["NOAA", "GOES", "METOP", "HIMAWARI", "FENGYUN", "JPSS"],
+  "gps-ops": ["GPS", "NAVSTAR", "GLONASS", "GALILEO", "BEIDOU", "QZSS"],
+  geo: ["GOES", "INTELSAT", "EUTELSAT", "INMARSAT", "ASTRA", "GALAXY"],
+  resource: ["LANDSAT", "SENTINEL", "AQUA", "TERRA", "RADARSAT", "WORLDVIEW", "PLEIADES", "RESOURCESAT", "CARTOSAT"],
+  communications: ["STARLINK", "ONEWEB", "IRIDIUM", "GLOBALSTAR", "ORBCOMM", "INTELSAT", "EUTELSAT", "INMARSAT"],
+  scientific: ["HUBBLE", "JWST", "TESS", "SWIFT", "FERMI", "CHANDRA", "XMM", "SENTINEL"],
+  payload: ["SATELLITE", "NAVSTAR", "STARLINK", "ONEWEB"]
 };
 function parseTle(text) {
   const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
@@ -85,8 +101,81 @@ function parseTle(text) {
   }
   return rows;
 }
-function parseOmmJson(payload) {
-  if (!Array.isArray(payload)) throw new Error("CelesTrak returned an invalid OMM JSON response.");
+function parseTleApiCollection(payload) {
+  if (!Array.isArray(payload?.member)) throw new Error("TLE API returned an invalid collection.");
+  return payload.member.flatMap(record => {
+    const name = String(record.name || "").trim();
+    const noradId = String(record.satelliteId ?? "").trim();
+    const line1 = String(record.line1 || "").trim();
+    const line2 = String(record.line2 || "").trim();
+    if (!name || !/^\d{1,5}$/.test(noradId) ||
+      line1.slice(2, 7).trim() !== noradId || line2.slice(2, 7).trim() !== noradId) return [];
+    return [{ name, noradId, line1, line2, elementEpoch: record.date || null }];
+  });
+}
+async function readJsonResponse(response, source) {
+  const body = await response.text();
+  try {
+    return JSON.parse(body);
+  } catch {
+    const excerpt = body.trim().replace(/\s+/g, " ").slice(0, 160);
+    throw new Error(`${source} returned invalid JSON${excerpt ? `: ${excerpt}` : "."}`);
+  }
+}
+async function fetchTleApiPage(search, page) {
+  const url = new URL(TLE_API_URL);
+  if (search) url.searchParams.set("search", search);
+  url.searchParams.set("page", String(page));
+  const response = await fetch(url, {
+    signal: AbortSignal.timeout(20000),
+    headers: { "Accept": "application/json", "User-Agent": "SatelliteTracking/1.0" }
+  });
+  if (!response.ok) throw new Error(`TLE API returned HTTP ${response.status}.`);
+  return readJsonResponse(response, "TLE API");
+}
+async function fetchTleApiRecords(group) {
+  let requests;
+  if (group === "active") {
+    requests = Array.from({ length: 5 }, (_, index) => fetchTleApiPage("", index + 1));
+    requests.push(fetch(`${TLE_API_URL}/popular`, {
+      signal: AbortSignal.timeout(20000),
+      headers: { "Accept": "application/json", "User-Agent": "SatelliteTracking/1.0" }
+    }).then(response => {
+      if (!response.ok) throw new Error(`TLE API returned HTTP ${response.status}.`);
+      return readJsonResponse(response, "TLE API");
+    }));
+  } else {
+    const searches = TLE_API_SEARCHES[group] || [];
+    requests = searches.flatMap(search => {
+      const pageCount = group === "starlink" ? 5 : group === "oneweb" ? 3 : 1;
+      return Array.from({ length: pageCount }, (_, index) => fetchTleApiPage(search, index + 1));
+    });
+  }
+  const results = await Promise.allSettled(requests);
+  const records = new Map();
+  const failures = [];
+  for (const result of results) {
+    if (result.status === "rejected") {
+      failures.push(result.reason?.message || "Unknown request error");
+      continue;
+    }
+    const payload = result.value;
+    for (const record of parseTleApiCollection(payload)) {
+      const epoch = Date.parse(record.elementEpoch || "");
+      if (!Number.isFinite(epoch) || Date.now() - epoch > 30 * 86400000) continue;
+      records.set(record.noradId, record);
+    }
+  }
+  const satellites = [...records.values()].filter(record => matchesSpaceTrackGroup(record, group));
+  if (!satellites.length) {
+    throw new Error(failures.length
+      ? `The free TLE API fallback failed: ${failures.join("; ")}`
+      : "The free TLE API returned no recent records for this group.");
+  }
+  return { satellites, warning: failures.length ? `Some TLE API searches failed: ${failures.join("; ")}` : "" };
+}
+function parseOmmJson(payload, providerName = "CelesTrak") {
+  if (!Array.isArray(payload)) throw new Error(`${providerName} returned an invalid OMM JSON response.`);
   const rows = payload.flatMap(record => {
     const noradId = String(record.NORAD_CAT_ID ?? "").trim();
     const name = String(record.OBJECT_NAME || record.OBJECT_ID || "").trim();
@@ -109,17 +198,23 @@ function parseOmmJson(payload) {
     };
     return [{ name, noradId, omm }];
   });
-  if (!rows.length) throw new Error("CelesTrak returned no valid OMM records.");
+  if (!rows.length) throw new Error(`${providerName} returned no valid OMM records.`);
   return rows;
 }
 function matchesSpaceTrackGroup(record, group) {
   const name = record.name.toUpperCase();
+  const objectType = String(record.omm?.OBJECT_TYPE || "").toUpperCase();
   if (group === "active") return true;
-  if (group === "stations") return /\b(ISS|ZARYA|TIANGONG|CSS|SPACE STATION)\b/.test(name);
+  if (group === "stations") return /\b(ISS|ZARYA|TIANGONG|TIANHE|WENTIAN|MENGTIAN|CSS|SPACE STATION)\b/.test(name);
   if (group === "starlink") return name.includes("STARLINK");
   if (group === "oneweb") return name.includes("ONEWEB");
   if (group === "weather") return /\b(NOAA|GOES|METOP|HIMAWARI|WEATHER|FENGYUN|JPSS)\b/.test(name);
   if (group === "gps-ops") return /\b(GPS|NAVSTAR|GLONASS|GALILEO|BEIDOU|QZSS)\b/.test(name);
+  if (group === "communications") return /\b(STARLINK|ONEWEB|IRIDIUM|GLOBALSTAR|ORBCOMM|INTELSAT|EUTELSAT|INMARSAT|ASTRA|GALAXY|SES)\b/.test(name);
+  if (group === "scientific") return /\b(HUBBLE|JWST|TESS|SWIFT|FERMI|CHANDRA|XMM|KEPLER|GAIA|NOAA|LANDSAT|SENTINEL)\b/.test(name);
+  if (group === "payload") return objectType === "PAYLOAD";
+  if (group === "rocket-body") return objectType === "ROCKET BODY";
+  if (group === "debris") return objectType === "DEBRIS";
   if (group === "geo") {
     const meanMotion = record.omm ? Number(record.omm.MEAN_MOTION) : Number(record.line2.slice(52, 63));
     return Number.isFinite(meanMotion) && meanMotion >= 0.8 && meanMotion <= 1.2;
@@ -127,7 +222,7 @@ function matchesSpaceTrackGroup(record, group) {
   if (group === "resource") return /\b(LANDSAT|SENTINEL|AQUA|TERRA|EARTH|RADARSAT|WORLDVIEW|PLEIADES|RESOURCESAT|CARTOSAT)\b/.test(name);
   return false;
 }
-async function fetchSpaceTrackRecords(group) {
+async function fetchSpaceTrackRecords(group, forceRefresh = false) {
   const identity = process.env.SPACETRACK_IDENTITY;
   const password = process.env.SPACETRACK_PASSWORD;
   if (!identity || !password) {
@@ -136,25 +231,34 @@ async function fetchSpaceTrackRecords(group) {
     throw error;
   }
 
-  const login = await fetch(`${SPACE_TRACK_URL}/ajaxauth/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ identity, password }),
-    signal: AbortSignal.timeout(20000)
-  });
-  if (!login.ok) throw new Error(`Space-Track login failed (HTTP ${login.status}). Check the server credentials and account access.`);
+  const catalogKey = "space-track-catalog:active";
+  const cachedCatalog = readCache.get(catalogKey);
+  let catalog = cachedCatalog && !forceRefresh && Date.now() - cachedCatalog.fetched_at < TTL
+    ? JSON.parse(cachedCatalog.payload)
+    : null;
+  if (!catalog) {
+    const login = await fetch(`${SPACE_TRACK_URL}/ajaxauth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ identity, password }),
+      signal: AbortSignal.timeout(20000)
+    });
+    if (!login.ok) throw new Error(`Space-Track login failed (HTTP ${login.status}). Check the server credentials and account access.`);
 
-  const cookies = login.headers.getSetCookie?.() ?? [login.headers.get("set-cookie")].filter(Boolean);
-  const cookieHeader = cookies.map(cookie => cookie.split(";")[0]).filter(Boolean).join("; ");
-  if (!cookieHeader) throw new Error("Space-Track login returned no authenticated session.");
+    const cookies = login.headers.getSetCookie?.() ?? [login.headers.get("set-cookie")].filter(Boolean);
+    const cookieHeader = cookies.map(cookie => cookie.split(";")[0]).filter(Boolean).join("; ");
+    if (!cookieHeader) throw new Error("Space-Track login returned no authenticated session.");
 
-  const query = `${SPACE_TRACK_URL}/basicspacedata/query/class/gp/DECAY_DATE/null-val/EPOCH/%3Enow-30/ORDERBY/NORAD_CAT_ID/FORMAT/tle`;
-  const response = await fetch(query, {
-    headers: { Cookie: cookieHeader, "User-Agent": "SatelliteTracking/1.0" },
-    signal: AbortSignal.timeout(30000)
-  });
-  if (!response.ok) throw new Error(`Space-Track GP query failed (HTTP ${response.status}). Check account access and API availability.`);
-  const records = parseTle(await response.text()).filter(record => matchesSpaceTrackGroup(record, group));
+    const query = `${SPACE_TRACK_URL}/basicspacedata/query/class/gp/DECAY_DATE/null-val/EPOCH/%3Enow-30/ORDERBY/NORAD_CAT_ID/FORMAT/json`;
+    const response = await fetch(query, {
+      headers: { Cookie: cookieHeader, "User-Agent": "SatelliteTracking/1.0" },
+      signal: AbortSignal.timeout(30000)
+    });
+    if (!response.ok) throw new Error(`Space-Track GP query failed (HTTP ${response.status}). Check account access and API availability.`);
+    catalog = parseOmmJson(await readJsonResponse(response, "Space-Track"), "Space-Track");
+    writeCache.run(catalogKey, JSON.stringify(catalog), Date.now());
+  }
+  const records = catalog.filter(record => matchesSpaceTrackGroup(record, group));
   if (!records.length) throw new Error(`Space-Track returned no recent TLE records for the ${GROUPS[group]} group.`);
   return records;
 }
@@ -401,10 +505,12 @@ app.get("/api/spacecraft-trajectories", async (req, res) => {
 app.get("/api/satellites", async (req, res) => {
   const group = String(req.query.group || "stations").toLowerCase();
   if (!Object.hasOwn(GROUPS, group)) return res.status(400).json({ error: "Unsupported satellite group." });
-  const provider = String(req.query.provider || "celestrak").toLowerCase();
+  const provider = String(req.query.provider || "space-track").toLowerCase();
   if (!["celestrak", "space-track"].includes(provider)) return res.status(400).json({ error: "Unsupported satellite data provider." });
   const providerName = provider === "celestrak" ? "CelesTrak" : "Space-Track";
-  const cacheKey = provider === "celestrak" ? `celestrak-omm:${group}` : `${provider}:${group}`;
+  const cacheKey = provider === "celestrak"
+    ? `celestrak-omm:${group}`
+    : `space-track-omm:${group}`;
   const cached = readCache.get(cacheKey);
   const legacyCached = provider === "celestrak" ? readCache.get(group) : null;
   const fallbackCache = cached || legacyCached;
@@ -424,30 +530,72 @@ app.get("/api/satellites", async (req, res) => {
   if (!forceRefresh && cached && now - cached.fetched_at < TTL) {
     const satellites = JSON.parse(cached.payload);
     const format = satellites[0]?.omm ? "OMM" : "TLE";
-    return res.json({ group, groupName: GROUPS[group], provider, providerName, format, fetchedAt: new Date(cached.fetched_at).toISOString(), stale: false, source: "sqlite-cache", count: satellites.length, satellites });
+    const usedTleFallback = provider === "celestrak" && format === "TLE";
+    return res.json({
+      group, groupName: GROUPS[group], provider,
+      providerName: usedTleFallback ? "TLE API fallback" : providerName,
+      format, fetchedAt: new Date(cached.fetched_at).toISOString(), stale: false,
+      source: usedTleFallback ? "TLE API cache" : "sqlite-cache",
+      warning: usedTleFallback ? "Using the cached free TLE API fallback; legacy TLE format cannot include catalog numbers above 99,999." : undefined,
+      count: satellites.length, satellites
+    });
   }
+  let celestrakError = "";
   try {
     let satellites;
     if (provider === "space-track") {
-      satellites = await fetchSpaceTrackRecords(group);
+      satellites = await fetchSpaceTrackRecords(group, forceRefresh);
+    } else if (Date.now() < celestrakBlockedUntil) {
+      celestrakError = "CelesTrak requests are temporarily paused after an HTTP 403 response.";
+      const fallback = await fetchTleApiRecords(group);
+      satellites = fallback.satellites;
+      const fetchedAt = Date.now();
+      writeCache.run(cacheKey, JSON.stringify(satellites), fetchedAt);
+      return res.json({
+        group, groupName: GROUPS[group], provider, providerName: "TLE API fallback", format: "TLE",
+        fetchedAt: new Date(fetchedAt).toISOString(), stale: false, source: "TLE API",
+        warning: `${celestrakError} Legacy TLE format cannot include catalog numbers above 99,999.${fallback.warning ? ` ${fallback.warning}` : ""}`,
+        count: satellites.length, satellites
+      });
     } else {
       const url = `https://celestrak.org/NORAD/elements/gp.php?GROUP=${encodeURIComponent(group.toUpperCase())}&FORMAT=JSON`;
       const upstream = await fetch(url, { signal: AbortSignal.timeout(30000), headers: { "Accept": "application/json", "User-Agent": "SatelliteTracking/1.0" } });
-      if (!upstream.ok) throw new Error(`CelesTrak returned HTTP ${upstream.status}.`);
-      satellites = parseOmmJson(await upstream.json());
+      if (!upstream.ok) {
+        if (upstream.status === 403) celestrakBlockedUntil = Date.now() + 24 * 60 * 60 * 1000;
+        throw new Error(`CelesTrak returned HTTP ${upstream.status}.`);
+      }
+      satellites = parseOmmJson(await readJsonResponse(upstream, "CelesTrak"));
     }
     const fetchedAt = Date.now();
     writeCache.run(cacheKey, JSON.stringify(satellites), fetchedAt);
-    const format = provider === "celestrak" ? "OMM" : "TLE";
-    res.json({ group, groupName: GROUPS[group], provider, providerName, format, fetchedAt: new Date(fetchedAt).toISOString(), stale: false, source: provider === "celestrak" ? "CelesTrak OMM JSON" : provider, count: satellites.length, satellites });
+    const format = satellites[0]?.omm ? "OMM" : "TLE";
+    const source = provider === "celestrak" ? "CelesTrak OMM JSON" : "Space-Track GP OMM JSON";
+    res.json({ group, groupName: GROUPS[group], provider, providerName, format, fetchedAt: new Date(fetchedAt).toISOString(), stale: false, source, count: satellites.length, satellites });
   } catch (error) {
     console.error(`[${providerName}] ${group}: ${error.message}`);
+    if (provider === "celestrak") {
+      celestrakError = error.message;
+      try {
+        const fallback = await fetchTleApiRecords(group);
+        const fetchedAt = Date.now();
+        writeCache.run(cacheKey, JSON.stringify(fallback.satellites), fetchedAt);
+        return res.json({
+          group, groupName: GROUPS[group], provider, providerName: "TLE API fallback", format: "TLE",
+          fetchedAt: new Date(fetchedAt).toISOString(), stale: false, source: "TLE API",
+          warning: `${celestrakError} Using the free TLE API fallback; legacy TLE format cannot include catalog numbers above 99,999.${fallback.warning ? ` ${fallback.warning}` : ""}`,
+          count: fallback.satellites.length, satellites: fallback.satellites
+        });
+      } catch (fallbackError) {
+        celestrakError = `${celestrakError} Fallback: ${fallbackError.message}`;
+        console.error(`[TLE API fallback] ${group}: ${fallbackError.message}`);
+      }
+    }
     if (fallbackCache) {
       const satellites = JSON.parse(fallbackCache.payload);
       const format = satellites[0]?.omm ? "OMM" : "TLE";
-      return res.json({ group, groupName: GROUPS[group], provider, providerName, format, fetchedAt: new Date(fallbackCache.fetched_at).toISOString(), stale: true, source: "sqlite-stale-cache", warning: error.message, count: satellites.length, satellites });
+      return res.json({ group, groupName: GROUPS[group], provider, providerName, format, fetchedAt: new Date(fallbackCache.fetched_at).toISOString(), stale: true, source: "sqlite-stale-cache", warning: celestrakError || error.message, count: satellites.length, satellites });
     }
-    res.status(error.statusCode || 502).json({ error: `${providerName} satellite data is unavailable and no provider-specific cached copy exists.`, details: error.message, suggestion: "Check provider availability and server configuration, then retry. Successful data is cached for two hours." });
+    res.status(error.statusCode || 502).json({ error: `${providerName} satellite data is unavailable and no provider-specific cached copy exists.`, details: celestrakError || error.message, suggestion: "Check provider availability and server configuration, then retry. Successful data is cached for two hours." });
   }
 });
 const dist = path.resolve(here, "../dist");

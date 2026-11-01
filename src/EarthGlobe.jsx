@@ -4,7 +4,7 @@ import { ShaderMaterial, SRGBColorSpace, TextureLoader, Vector2 } from "three";
 import CITY_DATA_URL from "../node_modules/globe.gl/example/datasets/ne_110m_populated_places_simple.geojson?url";
 import NIGHT_TEXTURE from "../node_modules/three-globe/example/img/earth-night.jpg?url";
 import STARFIELD_TEXTURE from "../node_modules/three-globe/example/img/night-sky.png?url";
-import { GROUPS, fetchDataProviders, fetchSatelliteRecords, calculateSatellite, calculateOrbitTrack, exportSatellitesCsv } from "./satelliteData.js";
+import { GROUPS, fetchDataProviders, fetchSatelliteRecords, calculateSatellite, calculateOrbitTrack, calculatePasses, exportSatellitesCsv } from "./satelliteData.js";
 const DAY_TEXTURE = "/images/nasa-blue-marble-2048.jpg";
 const COLORS = { LEO: "#2dd4bf", MEO: "#fbbf24", GEO: "#a78bfa" };
 const fmt = (n, d = 1) => Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: d, minimumFractionDigits: d }) : "—";
@@ -124,10 +124,12 @@ function getSolarPosition(date) {
   return { lat: declination * 180 / Math.PI, lng: longitude };
 }
 export default function EarthGlobe() {
-  const host = useRef(null), globe = useRef(null), globeMaterial = useRef(null), recordsRef = useRef([]), autoFocusedId = useRef("");
-  const [group, setGroup] = useState("active"), [provider, setProvider] = useState("celestrak"), [providerAvailability, setProviderAvailability] = useState(null), [providerStatusError, setProviderStatusError] = useState(""), [satellites, setSatellites] = useState([]), [selectedId, setSelectedId] = useState("");
-  const [search, setSearch] = useState(""), [orbitType, setOrbitType] = useState("ALL"), [minAlt, setMinAlt] = useState("0"), [maxAlt, setMaxAlt] = useState("40000");
+  const host = useRef(null), globe = useRef(null), globeMaterial = useRef(null), recordsRef = useRef([]), autoFocusedId = useRef(""), fullCatalogPreviousSelection = useRef(null);
+  const [group, setGroup] = useState("active"), [provider, setProvider] = useState("space-track"), [propagationModel, setPropagationModel] = useState("sgp4"), [providerAvailability, setProviderAvailability] = useState(null), [providerStatusError, setProviderStatusError] = useState(""), [satellites, setSatellites] = useState([]), [selectedId, setSelectedId] = useState("");
+  const [search, setSearch] = useState(""), [searchFullCatalog, setSearchFullCatalog] = useState(false), [orbitType, setOrbitType] = useState("ALL"), [objectTypeFilter, setObjectTypeFilter] = useState("ALL"), [minAlt, setMinAlt] = useState("0"), [maxAlt, setMaxAlt] = useState("40000");
   const [searchOpen, setSearchOpen] = useState(false), [activeSuggestion, setActiveSuggestion] = useState(-1);
+  const [sort, setSort] = useState({ key: "name", direction: "asc" });
+  const [coordinateCopyStatus, setCoordinateCopyStatus] = useState("");
   const [pathLimit, setPathLimit] = useState("25"), [visibleRows, setVisibleRows] = useState(100), [status, setStatus] = useState("Connecting to API…"), [error, setError] = useState(""), [dataInfo, setDataInfo] = useState(null), [updatedAt, setUpdatedAt] = useState(null), [isLoadingData, setIsLoadingData] = useState(false), [tick, setTick] = useState(0);
   const [cityCatalog, setCityCatalog] = useState([]), [cityLimit, setCityLimit] = useState(60), [showCityLabels, setShowCityLabels] = useState(true);
   const [solarClock, setSolarClock] = useState(() => Date.now());
@@ -142,9 +144,11 @@ export default function EarthGlobe() {
   const recalc = useCallback(() => {
     if (!recordsRef.current.length) return;
     const now = new Date(), rows = [];
-    for (const record of recordsRef.current) { try { const sat = calculateSatellite(record, now); if (sat) rows.push(sat); } catch {} }
-    setSatellites(rows); setUpdatedAt(now); setStatus(`Tracking ${rows.length.toLocaleString()} satellites`);
-  }, []);
+    for (const record of recordsRef.current) { try { const sat = calculateSatellite(record, now, propagationModel); if (sat) rows.push(sat); } catch (error) { console.error(`Unable to calculate ${propagationModel} position for NORAD ${record.noradId}:`, error); } }
+    setSatellites(rows); setUpdatedAt(now); setStatus(`Tracking ${rows.length.toLocaleString()} satellites with ${propagationModel === "fg" ? "F&G two-body" : "SGP4"}`);
+  }, [propagationModel]);
+  const recalcRef = useRef(recalc);
+  useEffect(() => { recalcRef.current = recalc; }, [recalc]);
   const load = useCallback(async (signal, forceRefresh = false, preserveExisting = false) => {
     setIsLoadingData(true); setError(""); setStatus(forceRefresh ? "Refreshing orbital data…" : "Loading orbital elements…");
     if (!preserveExisting) { setSatellites([]); recordsRef.current = []; setSelectedId(""); setDataInfo(null); }
@@ -155,7 +159,7 @@ export default function EarthGlobe() {
       setDataInfo(data);
       setError("");
       setStatus(data.stale ? `Using saved ${data.providerName} cache` : `Loaded ${data.count.toLocaleString()} ${data.format || "orbital element"} records from ${data.providerName}`);
-      recalc();
+      recalcRef.current();
     } catch (e) {
       if (e.name !== "AbortError") {
         setError(e.message || "Unknown API error");
@@ -164,7 +168,7 @@ export default function EarthGlobe() {
     } finally {
       if (!signal.aborted) setIsLoadingData(false);
     }
-  }, [group, provider, recalc]);
+  }, [group, provider]);
   useEffect(() => { const c = new AbortController(); load(c.signal); return () => c.abort(); }, [load]);
   useEffect(() => {
     const timeout = setTimeout(() => load(new AbortController().signal, false, true), automaticRefreshDelay);
@@ -266,16 +270,38 @@ export default function EarthGlobe() {
       .filter(({ satellite, name, noradId }) =>
         (!searchQuery || name.includes(searchQuery) || noradId.includes(searchQuery)) &&
         (orbitType === "ALL" || satellite.orbitType === orbitType) &&
+        (objectTypeFilter === "ALL" || satellite.omm?.OBJECT_TYPE === objectTypeFilter) &&
         satellite.altitudeKm >= lo && satellite.altitudeKm <= hi);
     if (searchQuery) {
       const rank = ({ name, noradId }) => name === searchQuery || noradId === searchQuery ? 0 : name.startsWith(searchQuery) || noradId.startsWith(searchQuery) ? 1 : 2;
       matches.sort((a, b) => rank(a) - rank(b) || a.noradId.localeCompare(b.noradId, undefined, { numeric: true }));
     }
     return matches.map(({ satellite }) => satellite);
-  }, [searchableSatellites, searchQuery, orbitType, minAlt, maxAlt]);
+  }, [searchableSatellites, searchQuery, orbitType, objectTypeFilter, minAlt, maxAlt]);
+  const sortedFiltered = useMemo(() => {
+    const valueFor = (satellite, key) => key === "objectType"
+      ? satellite.omm?.OBJECT_TYPE || ""
+      : satellite[key] ?? "";
+    return [...filtered].sort((a, b) => {
+      const left = valueFor(a, sort.key), right = valueFor(b, sort.key);
+      if ((left === "") !== (right === "")) return left === "" ? 1 : -1;
+      const comparison = typeof left === "number" && typeof right === "number"
+        ? left - right
+        : String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: "base" });
+      return comparison * (sort.direction === "asc" ? 1 : -1);
+    });
+  }, [filtered, sort]);
+  const objectCounts = useMemo(() => satellites.reduce((counts, item) => {
+    const type = String(item.omm?.OBJECT_TYPE || "").toUpperCase();
+    if (type === "DEBRIS") {
+      counts.debris += 1;
+      if (item.perigeeAltitudeKm >= 0 && item.perigeeAltitudeKm < 200) counts.lowPerigeeDebris += 1;
+    } else if (type === "ROCKET BODY") counts.rocketBodies += 1;
+    return counts;
+  }, { debris: 0, rocketBodies: 0, lowPerigeeDebris: 0 }), [satellites]);
   const searchSuggestions = useMemo(() => searchQuery ? filtered.slice(0, 6) : [], [filtered, searchQuery]);
   const searchMatch = searchQuery ? filtered[0] || null : null;
-  useEffect(() => { setVisibleRows(100); }, [searchQuery, orbitType, minAlt, maxAlt, group]);
+  useEffect(() => { setVisibleRows(100); }, [searchQuery, orbitType, objectTypeFilter, minAlt, maxAlt, group]);
   useEffect(() => {
     if (!searchQuery) { autoFocusedId.current = ""; return; }
     if (!searchMatch) { setSelectedId(""); autoFocusedId.current = ""; return; }
@@ -286,8 +312,9 @@ export default function EarthGlobe() {
     }
   }, [searchQuery, searchMatch?.noradId]);
   const selected = filtered.find(s => s.noradId === selectedId) || satellites.find(s => s.noradId === selectedId) || null;
+  useEffect(() => { setCoordinateCopyStatus(""); }, [selectedId]);
   const points = useMemo(() => filtered.slice(0, 2500), [filtered]);
-  const paths = useMemo(() => { const n = pathLimit === "all" ? 2500 : Number(pathLimit), candidates = filtered.slice(0, n), now = new Date(); return candidates.flatMap(s => { const coords = calculateOrbitTrack(s.satrec, now, 100, 5); return coords.length > 1 ? [{ name: s.name, noradId: s.noradId, orbitType: s.orbitType, coords }] : []; }); }, [filtered, pathLimit]);
+  const paths = useMemo(() => { const n = pathLimit === "all" ? 2500 : Number(pathLimit), candidates = filtered.slice(0, n), now = new Date(); return candidates.flatMap(s => { const coords = calculateOrbitTrack(s, now, 100, 5, propagationModel); return coords.length > 1 ? [{ name: s.name, noradId: s.noradId, orbitType: s.orbitType, coords }] : []; }); }, [filtered, pathLimit, propagationModel]);
   useEffect(() => { if (globe.current) { globe.current.pointRadius(d => d.noradId === selectedId ? .24 : .10).pointColor(d => d.noradId === selectedId ? "#fff" : COLORS[d.orbitType]).pathColor(p => p.noradId === selectedId ? "#fff" : COLORS[p.orbitType]).pathStroke(p => p.noradId === selectedId ? 1.4 : .45).pointsData(points).pathsData(paths); } }, [points, paths, selectedId]);
   const focus = sat => { setSelectedId(sat.noradId); globe.current?.pointOfView({ lat: sat.lat, lng: sat.lng, altitude: 1.5 }, 800); };
   const resetGlobeView = () => {
@@ -296,6 +323,18 @@ export default function EarthGlobe() {
     globe.current?.pointOfView({ lat: -solarPosition.lat, lng: nightLongitude, altitude: 2.1 }, 800);
   };
   const chooseSuggestion = sat => { setSearch(sat.name); setSearchOpen(false); setActiveSuggestion(-1); focus(sat); };
+  const enableFullCatalogSearch = enabled => {
+    if (enabled) {
+      fullCatalogPreviousSelection.current = { provider, group };
+      setProvider("space-track");
+      setGroup("active");
+    } else if (searchFullCatalog && fullCatalogPreviousSelection.current) {
+      setProvider(fullCatalogPreviousSelection.current.provider);
+      setGroup(fullCatalogPreviousSelection.current.group);
+      fullCatalogPreviousSelection.current = null;
+    }
+    setSearchFullCatalog(enabled);
+  };
   const handleSearchKeyDown = event => {
     if (event.key === "Escape") { setSearchOpen(false); setActiveSuggestion(-1); }
     else if (event.key === "ArrowDown" && searchSuggestions.length) {
@@ -311,28 +350,179 @@ export default function EarthGlobe() {
     }
   };
   const retry = () => load(new AbortController().signal, true, true);
+  const toggleSort = key => setSort(current => ({
+    key,
+    direction: current.key === key && current.direction === "asc" ? "desc" : "asc"
+  }));
+  const sortHeader = (key, label) => <th key={key} scope="col" aria-sort={sort.key === key ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}>
+    <button className="table-sort" type="button" onClick={() => toggleSort(key)}>{label}<span aria-hidden="true">{sort.key === key ? (sort.direction === "asc" ? " ↑" : " ↓") : " ↕"}</span></button>
+  </th>;
+  const copyCoordinates = async () => {
+    if (!selected || !navigator.clipboard?.writeText) {
+      setCoordinateCopyStatus("Clipboard access is unavailable in this browser context.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(`${selected.lat.toFixed(6)}, ${selected.lng.toFixed(6)}`);
+      setCoordinateCopyStatus("Latitude, longitude copied.");
+    } catch (error) {
+      setCoordinateCopyStatus(`Could not copy coordinates: ${error.message}`);
+    }
+  };
   return <section className="tracker">
     <div className="section-heading"><div><p className="eyebrow">LIVE ORBITAL VIEW</p><h2>3D Satellite Orbit Viewer</h2><p className="muted">Drag to rotate · Scroll to zoom · Click a satellite to inspect it</p></div><div className="status-pill"><i className={error ? "status-dot error-dot" : "status-dot"}/>{error ? "DATA OFFLINE" : dataInfo?.stale ? "CACHED DATA" : "SYSTEM STATUS"}</div></div>
     <div className="toolbar">
-      <label className="field"><span>Data provider</span><select value={provider} onChange={event => setProvider(event.target.value)}><option value="celestrak">CelesTrak</option><option value="space-track">Space-Track{spaceTrackConfigured ? "" : " · needs setup"}</option></select></label>
-      <label className="field"><span>Satellite group</span><select value={group} onChange={e => setGroup(e.target.value)}>{GROUPS.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select></label>
+      <label className="field"><span>Data provider</span><select value={provider} onChange={event => { setProvider(event.target.value); setSearchFullCatalog(false); fullCatalogPreviousSelection.current = null; }}><option value="celestrak">CelesTrak</option><option value="space-track">Space-Track{spaceTrackConfigured ? "" : " · needs setup"}</option></select></label>
+      <label className="field"><span>Satellite group</span><select value={group} onChange={event => { setGroup(event.target.value); setSearchFullCatalog(false); fullCatalogPreviousSelection.current = null; }}>{GROUPS.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select></label>
+      <label className="field"><span>Propagation model</span><select value={propagationModel} onChange={event => setPropagationModel(event.target.value)}><option value="sgp4">SGP4 · TLE/OMM standard</option><option value="fg">F&G · two-body comparison</option></select></label>
       <div className="field search-field"><label htmlFor="satellite-search"><span>Find a satellite</span></label><div className="search-control"><span className="search-icon" aria-hidden="true"/><input id="satellite-search" type="search" role="combobox" aria-autocomplete="list" aria-expanded={searchOpen && searchSuggestions.length > 0} aria-controls="satellite-search-results" aria-activedescendant={activeSuggestion >= 0 ? `satellite-suggestion-${activeSuggestion}` : undefined} value={search} onFocus={() => setSearchOpen(true)} onChange={event => { setSearch(event.target.value); setSearchOpen(true); setActiveSuggestion(-1); }} onKeyDown={handleSearchKeyDown} onBlur={() => window.setTimeout(() => { setSearchOpen(false); setActiveSuggestion(-1); }, 120)} placeholder="Search satellite name or NORAD ID…" />{search && <button type="button" className="search-clear" onMouseDown={event => event.preventDefault()} onClick={() => { setSearch(""); setSearchOpen(true); setActiveSuggestion(-1); document.getElementById("satellite-search")?.focus(); }} aria-label="Clear satellite search">×</button>}
         {searchOpen && searchQuery && <div className="search-results" id="satellite-search-results" role="listbox" aria-label="Satellite search suggestions">{searchSuggestions.length ? searchSuggestions.map((satellite, index) => <button type="button" role="option" aria-selected={activeSuggestion === index} id={`satellite-suggestion-${index}`} className={`search-result${activeSuggestion === index ? " active" : ""}`} key={satellite.noradId} onMouseDown={event => event.preventDefault()} onClick={() => chooseSuggestion(satellite)}><span className="search-result-main"><b>{satellite.name}</b><small>NORAD {satellite.noradId}</small></span><span className="search-result-orbit" style={{ color: COLORS[satellite.orbitType] }}>{satellite.orbitType}</span></button>) : <div className="search-no-results">No matches. Try another name or NORAD ID.</div>}</div>}
-      </div><small className="search-summary" aria-live="polite">{searchQuery ? `${filtered.length.toLocaleString()} matching ${filtered.length === 1 ? "satellite" : "satellites"}` : "Search across the loaded satellite group"}</small></div>
+      </div>            <small className="search-summary" aria-live="polite">{searchQuery ? `${filtered.length.toLocaleString()} matching ${filtered.length === 1 ? "satellite" : "satellites"}` : "Search across the loaded satellite group"}{searchFullCatalog ? " · all active Space-Track objects" : ""}</small>
+      <label className="catalog-search-toggle"><input type="checkbox" checked={searchFullCatalog} onChange={event => enableFullCatalogSearch(event.target.checked)}/> Search entire active catalog</label></div>
       <label className="field"><span>Orbit class</span><select value={orbitType} onChange={e => setOrbitType(e.target.value)}><option value="ALL">All orbit classes</option><option value="LEO">LEO</option><option value="MEO">MEO</option><option value="GEO">GEO</option></select></label>
-      <div className="toolbar-actions"><button className="button refresh-button" disabled={isLoadingData} onClick={retry} title="Request the latest data from the selected provider">{isLoadingData ? "Updating…" : "↻ Update data"}</button><button className="button" disabled={!filtered.length} onClick={() => exportSatellitesCsv(filtered)}>Export CSV ↓</button></div>
+      <label className="field"><span>Object type</span><select value={objectTypeFilter} onChange={event => setObjectTypeFilter(event.target.value)}><option value="ALL">All object types</option><option value="PAYLOAD">Payload</option><option value="ROCKET BODY">Rocket body</option><option value="DEBRIS">Debris</option></select></label>
+      <div className="toolbar-actions"><button className="button refresh-button" disabled={isLoadingData} onClick={retry} title="Request the latest data from the selected provider">{isLoadingData ? "Updating…" : "↻ Update data"}</button><button className="button" disabled={!filtered.length} onClick={() => exportSatellitesCsv(sortedFiltered)}>Export CSV ↓</button></div>
     </div>
     {providerStatusError && <p className="provider-note warning">{providerStatusError}</p>}
     {provider === "space-track" && !spaceTrackConfigured && <p className="provider-note">Space-Track needs server credentials. Set <code>SPACETRACK_IDENTITY</code> and <code>SPACETRACK_PASSWORD</code> in <code>.env</code>, then restart the server. Credentials stay on the server and are never sent to the browser.</p>}
-    {dataInfo?.stale && <p className="provider-note warning">{dataInfo.warning || "The latest provider request failed; saved orbital data is still being used."} The app will retry automatically in about five minutes.</p>}
-    <div className="filter-row"><strong>Altitude filter <small>(km)</small></strong><label>Min <input type="number" min="0" value={minAlt} onChange={e => setMinAlt(e.target.value)}/></label><label>Max <input type="number" min="0" value={maxAlt} onChange={e => setMaxAlt(e.target.value)}/></label><label>Orbital paths <select value={pathLimit} onChange={e => setPathLimit(e.target.value)}><option value="25">25 max</option><option value="100">100 max</option><option value="250">250 max</option><option value="500">500 max</option><option value="all">All displayed (up to 2,500)</option></select></label><button className="link-button" onClick={() => { setSearch(""); setOrbitType("ALL"); setMinAlt("0"); setMaxAlt("40000"); }}>Reset filters</button></div>
+    {dataInfo?.warning && <p className="provider-note warning">{dataInfo.warning}{dataInfo.stale ? " The app will retry automatically in about five minutes." : ""}</p>}
+    <div className="filter-row"><strong>Altitude filter <small>(km)</small></strong><label>Min <input type="number" min="0" value={minAlt} onChange={e => setMinAlt(e.target.value)}/></label><label>Max <input type="number" min="0" value={maxAlt} onChange={e => setMaxAlt(e.target.value)}/></label><label>Orbital paths <select value={pathLimit} onChange={e => setPathLimit(e.target.value)}><option value="25">25 max</option><option value="100">100 max</option><option value="250">250 max</option><option value="500">500 max</option><option value="all">All displayed (up to 2,500)</option></select></label><button className="link-button" onClick={() => { setSearch(""); setOrbitType("ALL"); setObjectTypeFilter("ALL"); setMinAlt("0"); setMaxAlt("40000"); }}>Reset filters</button></div>
     {error && <div className="error-panel"><b>{recordsRef.current.length ? "Could not update satellite data" : "Satellite data could not be loaded"}</b><p>{error}</p><p>{recordsRef.current.length ? `Tracking continues using the last successful ${dataInfo?.providerName || "provider"} data from ${dataInfo?.fetchedAt ? new Date(dataInfo.fetchedAt).toLocaleString() : "an earlier fetch"}.` : "The app will retry automatically in about five minutes. If the provider keeps rejecting requests, its access policy or the deployment network must allow the request before new orbital data can load."}</p><button className="button" disabled={isLoadingData} onClick={retry}>{isLoadingData ? "Updating…" : "Try update again"}</button></div>}
-    <div className="metrics-grid"><Metric label="Loaded satellites" value={satellites.length.toLocaleString()} sub={`${dataInfo?.providerName || "Selected provider"} ${dataInfo?.format || "orbital element"} records`}/><Metric label="Filtered results" value={filtered.length.toLocaleString()} sub="Current filters and search"/><Metric label="Orbital paths" value={paths.length.toLocaleString()} sub="100-minute prediction window"/><Metric label="Last data fetch" value={dataInfo?.fetchedAt ? new Date(dataInfo.fetchedAt).toLocaleTimeString() : "Waiting"} sub={dataInfo?.stale ? "Cached data · refresh may be limited upstream" : dataInfo?.fetchedAt ? new Date(dataInfo.fetchedAt).toLocaleDateString() : "Fetching provider data"}/></div>
+    <div className="metrics-grid"><Metric label="Loaded satellites" value={satellites.length.toLocaleString()} sub={`${dataInfo?.providerName || "Selected provider"} ${dataInfo?.format || "orbital element"} records`}/><Metric label="Filtered results" value={filtered.length.toLocaleString()} sub="Current filters and search"/><Metric label="Orbital paths" value={paths.length.toLocaleString()} sub="100-minute prediction window"/><Metric label="Debris objects" value={objectCounts.debris.toLocaleString()} sub="In the loaded catalog"/><Metric label="Rocket bodies" value={objectCounts.rocketBodies.toLocaleString()} sub="In the loaded catalog"/><Metric label="Low-perigee debris" value={objectCounts.lowPerigeeDebris.toLocaleString()} sub="Perigee below 200 km; not a collision-risk estimate"/></div>
     <div className="globe-layout"><div className="globe-panel"><div className="globe-panel-top"><span className="globe-legend"><i className="legend leo"/> LEO <i className="legend meo"/> MEO <i className="legend geo"/> GEO</span><span className="globe-source">{dataInfo ? `${dataInfo.providerName} · ${dataInfo.source}${dataInfo.stale ? " · stale cache" : ""}` : status}</span><div className="globe-actions"><button type="button" className="globe-control" onClick={() => setShowCityLabels(value => !value)} aria-pressed={showCityLabels}>{showCityLabels ? "Cities on" : "Cities off"}</button><button type="button" className="globe-control" onClick={resetGlobeView}>Global view</button></div></div><div className="globe-container" ref={host}/><div className="globe-foot">{status} · rendered marker cap: 2,500 · Day/night terminator · subsolar {fmt(solarPosition.lat)}°, {fmt(solarPosition.lng)}° · <a href="https://science.nasa.gov/earth/earth-observatory/blue-marble-next-generation/" target="_blank" rel="noreferrer">NASA Earth Observatory · Blue Marble Next Generation</a></div></div>
-    <aside className="telemetry-panel"><p className="eyebrow">OBJECT INSPECTOR</p><h3>Satellite telemetry</h3>{selected ? <><h2 className="selected-name">{selected.name}</h2><p className="muted">NORAD ID {selected.noradId}</p><span className="orbit-badge" style={{color:COLORS[selected.orbitType]}}>{selected.orbitType} ORBIT</span><div className="telemetry-grid"><Datum label="Latitude" value={`${fmt(selected.lat,3)}°`}/><Datum label="Longitude" value={`${fmt(selected.lng,3)}°`}/><Datum label="Altitude" value={`${fmt(selected.altitudeKm)} km`}/><Datum label="Speed" value={`${fmt(selected.speedKmS,3)} km/s`}/><Datum label="Inclination" value={`${fmt(selected.inclinationDeg,2)}°`}/><Datum label="Eccentricity" value={fmt(selected.eccentricity,5)}/><Datum label="Period" value={`${fmt(selected.periodMin)} min`}/><Datum label="Mean altitude" value={`${fmt(selected.meanAltitudeKm,0)} km`}/><Datum label="Perigee" value={`${fmt(selected.perigeeAltitudeKm,0)} km`}/><Datum label="Apogee" value={`${fmt(selected.apogeeAltitudeKm,0)} km`}/></div><button className="button focus-button" onClick={() => globe.current?.pointOfView({lat:selected.lat,lng:selected.lng,altitude:1.5},800)}>Focus satellite</button></> : <div className="empty-selection"><div>◎</div><b>Select a satellite</b><p>Click a globe marker or use Inspect in the catalogue below.</p></div>}<div className="source-box"><small>ORBITAL ELEMENT SOURCE</small><b><a href={provider === "space-track" ? "https://www.space-track.org/" : "https://celestrak.org/"} target="_blank" rel="noreferrer">{dataInfo?.providerName || (provider === "space-track" ? "Space-Track" : "CelesTrak")} ↗</a></b><span>{dataInfo?.fetchedAt ? `Retrieved ${new Date(dataInfo.fetchedAt).toLocaleString()}` : "No successful data fetch yet"}</span>{dataInfo?.warning && <span className="warning">{dataInfo.warning}</span>}</div></aside></div>
-    <div className="table-panel"><div className="table-header"><div><p className="eyebrow">CATALOG BROWSER</p><h3>Satellite catalogue</h3></div><span>Showing {Math.min(visibleRows,filtered.length).toLocaleString()} of {filtered.length.toLocaleString()}</span></div><div className="table-scroll"><table><thead><tr><th>Name</th><th>NORAD ID</th><th>Orbit</th><th>Altitude km</th><th>Speed km/s</th><th>Latitude</th><th>Longitude</th><th></th></tr></thead><tbody>{filtered.slice(0,visibleRows).map(s => <tr key={s.noradId} className={selectedId===s.noradId?"selected-row":""}><td className="sat-name">{s.name}</td><td>{s.noradId}</td><td style={{color:COLORS[s.orbitType]}}>{s.orbitType}</td><td>{fmt(s.altitudeKm)}</td><td>{fmt(s.speedKmS,3)}</td><td>{fmt(s.lat,3)}°</td><td>{fmt(s.lng,3)}°</td><td><button className="link-button" onClick={() => focus(s)}>Inspect ↗</button></td></tr>)}{!filtered.length && <tr><td colSpan="8" className="empty-table">{searchQuery ? "No satellites match this search and the selected filters." : "No satellites match the selected filters or data has not loaded."}</td></tr>}</tbody></table></div>{visibleRows < filtered.length && <div className="table-more"><button className="button" onClick={() => setVisibleRows(count => Math.min(count + 100, filtered.length))}>Show 100 more results</button></div>}</div>
-    <p className="disclaimer">Positions are estimates from publicly available GP orbital data propagated using SGP4. Large groups may be slow. Not a certified navigation, collision-avoidance, or operational tracking system.</p>
+    <aside className="telemetry-panel"><p className="eyebrow">OBJECT INSPECTOR</p><h3>Satellite telemetry</h3>{selected ? <><h2 className="selected-name">{selected.name}</h2><p className="muted">NORAD ID {selected.noradId}</p><span className="orbit-badge" style={{color:COLORS[selected.orbitType]}}>{selected.orbitType} ORBIT</span><div className="telemetry-grid"><Datum label="Latitude" value={`${fmt(selected.lat,3)}°`}/><Datum label="Longitude" value={`${fmt(selected.lng,3)}°`}/><Datum label="Position calculated (UTC)" value={selected.positionTimeUtc || "Not available"}/><Datum label="Altitude" value={`${fmt(selected.altitudeKm)} km`}/><Datum label="Speed" value={`${fmt(selected.speedKmS,3)} km/s`}/><Datum label="Inclination" value={`${fmt(selected.inclinationDeg,2)}°`}/><Datum label="Eccentricity" value={fmt(selected.eccentricity,5)}/><Datum label="Period" value={`${fmt(selected.periodMin)} min`}/><Datum label="Mean altitude" value={`${fmt(selected.meanAltitudeKm,0)} km`}/><Datum label="Perigee" value={`${fmt(selected.perigeeAltitudeKm,0)} km`}/><Datum label="Apogee" value={`${fmt(selected.apogeeAltitudeKm,0)} km`}/><Datum label="Object type" value={selected.omm?.OBJECT_TYPE || "Not provided"}/><Datum label="Country" value={selected.omm?.COUNTRY_CODE || "Not provided"}/><Datum label="Launch date" value={selected.omm?.LAUNCH_DATE || "Not provided"}/><Datum label="Element epoch" value={selected.elementEpoch ? new Date(selected.elementEpoch).toLocaleString() : "Not provided"}/><Datum label="Element age" value={selected.elementAgeHours === null ? "Unknown" : `${fmt(selected.elementAgeHours,1)} hours · ${selected.elementFreshness}`}/><Datum label="Propagation model" value={propagationModel === "fg" ? "F&G two-body" : "SGP4"}/></div><button className="button focus-button" onClick={() => globe.current?.pointOfView({lat:selected.lat,lng:selected.lng,altitude:1.5},800)}>Focus satellite</button><button className="button copy-coordinates" type="button" onClick={copyCoordinates}>Copy latitude, longitude</button>{coordinateCopyStatus && <p className="copy-status" role="status">{coordinateCopyStatus}</p>}</> : <div className="empty-selection"><div>◎</div><b>Select a satellite</b><p>Click a globe marker or use Inspect in the catalogue below.</p></div>}<PassPredictor selected={selected} algorithm={propagationModel}/><div className="source-box"><small>ORBITAL ELEMENT SOURCE</small><b><a href={provider === "space-track" ? "https://www.space-track.org/" : "https://celestrak.org/"} target="_blank" rel="noreferrer">{dataInfo?.providerName || (provider === "space-track" ? "Space-Track" : "CelesTrak")} ↗</a></b><span>{dataInfo?.fetchedAt ? `Retrieved ${new Date(dataInfo.fetchedAt).toLocaleString()}` : "No successful data fetch yet"}</span><span>{selected?.elementFreshness ? `Selected element status: ${selected.elementFreshness}` : "Element freshness appears when a satellite is selected"}</span>{dataInfo?.warning && <span className="warning">{dataInfo.warning}</span>}</div></aside></div>
+    <div className="table-panel"><div className="table-header"><div><p className="eyebrow">CATALOG BROWSER</p><h3>Satellite catalogue</h3></div><span>Showing {Math.min(visibleRows,sortedFiltered.length).toLocaleString()} of {sortedFiltered.length.toLocaleString()}</span></div><div className="table-scroll"><table><thead><tr>{[["name","Name"],["noradId","NORAD ID"],["objectType","Object type"],["orbitType","Orbit"],["altitudeKm","Altitude km"],["elementAgeHours","Element age"],["lat","Latitude"],["lng","Longitude"]].map(([key,label]) => sortHeader(key,label))}<th scope="col">Inspect</th></tr></thead><tbody>{sortedFiltered.slice(0,visibleRows).map(s => <tr key={s.noradId} className={selectedId===s.noradId?"selected-row":""}><td className="sat-name">{s.name}</td><td>{s.noradId}</td><td>{s.omm?.OBJECT_TYPE || "—"}</td><td style={{color:COLORS[s.orbitType]}}>{s.orbitType}</td><td>{fmt(s.altitudeKm)}</td><td>{s.elementAgeHours === null ? "—" : `${fmt(s.elementAgeHours,1)} h · ${s.elementFreshness}`}</td><td>{fmt(s.lat,3)}°</td><td>{fmt(s.lng,3)}°</td><td><button className="link-button" onClick={() => focus(s)}>Inspect ↗</button></td></tr>)}{!sortedFiltered.length && <tr><td colSpan="9" className="empty-table">{searchQuery ? "No satellites match this search and the selected filters." : "No satellites match the selected filters or data has not loaded."}</td></tr>}</tbody></table></div>{visibleRows < sortedFiltered.length && <div className="table-more"><button className="button" onClick={() => setVisibleRows(count => Math.min(count + 100, sortedFiltered.length))}>Show 100 more results</button></div>}</div>
+    <p className="disclaimer">{propagationModel === "fg" ? "F&G mode uses a two-body universal-variable model seeded from the Space-Track element epoch. It omits drag, Earth oblateness, and third-body perturbations; use SGP4 for standard TLE/OMM tracking." : "Positions are estimates from publicly available GP orbital data propagated using SGP4."} Large groups may be slow. Not a certified navigation, collision-avoidance, or operational tracking system.</p>
   </section>;
 }
 function Metric({label,value,sub}) { return <div className="metric-card"><span>{label}</span><b>{value}</b><small>{sub}</small></div>; }
 function Datum({label,value}) { return <div className="datum"><small>{label}</small><b>{value}</b></div>; }
+function PassPredictor({ selected, algorithm }) {
+  const [latitude, setLatitude] = useState("");
+  const [longitude, setLongitude] = useState("");
+  const [minimumElevation, setMinimumElevation] = useState("10");
+  const [passes, setPasses] = useState([]);
+  const [isCalculating, setIsCalculating] = useState(false);
+  const [alertsEnabled, setAlertsEnabled] = useState(false);
+  const [message, setMessage] = useState("");
+
+  const useMyLocation = () => {
+    if (!navigator.geolocation) {
+      setMessage("Location is not supported by this browser. You can enter coordinates manually.");
+      return;
+    }
+    setMessage("Requesting location permission…");
+    navigator.geolocation.getCurrentPosition(
+      ({ coords }) => {
+        setLatitude(coords.latitude.toFixed(5));
+        setLongitude(coords.longitude.toFixed(5));
+        setMessage("Observer coordinates set in this browser only.");
+      },
+      error => {
+        const reason = error.code === error.PERMISSION_DENIED
+          ? "Location permission was denied."
+          : error.code === error.TIMEOUT
+            ? "Location request timed out."
+            : "Current location is unavailable.";
+        setMessage(`${reason} You can enter coordinates manually.`);
+      },
+      { enableHighAccuracy: false, maximumAge: 60_000, timeout: 10_000 }
+    );
+  };
+
+  useEffect(() => {
+    setPasses([]);
+    setAlertsEnabled(false);
+    setMessage("");
+  }, [selected?.noradId, algorithm]);
+
+  useEffect(() => {
+    if (!alertsEnabled || !passes.length || typeof Notification === "undefined" || Notification.permission !== "granted") return undefined;
+    const nextPass = passes.find(pass => !pass.ongoing && pass.aos.getTime() > Date.now());
+    if (!nextPass) return undefined;
+    const timeout = window.setTimeout(() => {
+      new Notification(`${selected?.name || "Satellite"} pass soon`, {
+        body: `Visible above ${minimumElevation}° elevation at ${nextPass.aos.toLocaleTimeString()}.`
+      });
+      setAlertsEnabled(false);
+    }, Math.min(nextPass.aos.getTime() - Date.now(), 2147483647));
+    return () => window.clearTimeout(timeout);
+  }, [alertsEnabled, passes, selected?.name, minimumElevation]);
+
+  const predict = () => {
+    const lat = Number(latitude), lng = Number(longitude), mask = Number(minimumElevation);
+    if (!selected) {
+      setMessage("Select a satellite before calculating passes.");
+      return;
+    }
+    if (!latitude.trim() || !longitude.trim() || !Number.isFinite(lat) || lat < -90 || lat > 90 || !Number.isFinite(lng) || lng < -180 || lng > 180) {
+      setMessage("Enter a valid latitude (−90 to 90) and longitude (−180 to 180).");
+      return;
+    }
+    setMessage("");
+    setIsCalculating(true);
+    window.setTimeout(() => {
+      try {
+        const results = calculatePasses(selected.satrec, { latitude: lat, longitude: lng }, new Date(), 24, mask, algorithm, selected.elementEpoch);
+        setPasses(results);
+        if (!results.length) setMessage("No passes above this elevation mask in the next 24 hours.");
+      } catch (error) {
+        setPasses([]);
+        setMessage(`Pass prediction failed: ${error.message}`);
+      } finally {
+        setIsCalculating(false);
+      }
+    }, 0);
+  };
+
+  const enableAlerts = async () => {
+    if (typeof Notification === "undefined") {
+      setMessage("Browser notifications are not supported here.");
+      return;
+    }
+    let permission = Notification.permission;
+    if (permission !== "granted") {
+      try {
+        permission = await Notification.requestPermission();
+      } catch (error) {
+        setMessage(`Could not request notification permission: ${error.message}`);
+        return;
+      }
+    }
+    if (permission !== "granted") {
+      setAlertsEnabled(false);
+      setMessage("Notification permission was not granted. Pass times remain available on this page.");
+      return;
+    }
+    if (!passes.some(pass => !pass.ongoing && pass.aos.getTime() > Date.now())) {
+      setMessage("Calculate passes first; there is no future pass to alert for.");
+      return;
+    }
+    setMessage("Browser alert enabled for the next predicted pass. Keep this page open.");
+    setAlertsEnabled(true);
+  };
+
+  return <section className="pass-predictor">
+    <p className="eyebrow">LOCAL PASS PREDICTION</p>
+    <h4>Upcoming passes</h4>
+    <p className="pass-location-note">Enter observer coordinates. They stay in this browser and are not sent to the server.</p>
+    <button className="button location-button" type="button" onClick={useMyLocation}>Use my current location</button>
+    <div className="pass-location-fields">
+      <label>Latitude<input aria-label="Observer latitude" inputMode="decimal" type="number" min="-90" max="90" step="any" value={latitude} onChange={event => setLatitude(event.target.value)} placeholder="e.g. 13.08"/></label>
+      <label>Longitude<input aria-label="Observer longitude" inputMode="decimal" type="number" min="-180" max="180" step="any" value={longitude} onChange={event => setLongitude(event.target.value)} placeholder="e.g. 80.27"/></label>
+      <label>Min. elevation<select aria-label="Minimum pass elevation" value={minimumElevation} onChange={event => setMinimumElevation(event.target.value)}><option value="0">0°</option><option value="5">5°</option><option value="10">10°</option><option value="20">20°</option></select></label>
+    </div>
+    <div className="pass-actions">
+      <button className="button" type="button" disabled={!selected || isCalculating} onClick={predict}>{isCalculating ? "Calculating…" : "Predict next 24 hours"}</button>
+      <button className="button" type="button" disabled={!passes.length || alertsEnabled} onClick={enableAlerts}>{alertsEnabled ? "Alert enabled" : "Enable browser alert"}</button>
+    </div>
+    {message && <p className="pass-message" role="status">{message}</p>}
+    {passes.length > 0 && <div className="pass-results" aria-live="polite">
+      {passes.slice(0, 6).map((pass, index) => <div className="pass-result" key={`${pass.aos.toISOString()}-${index}`}>
+        <b>{pass.ongoing ? "In progress" : pass.aos.toLocaleString()}</b>
+        <span>Peak {pass.maxElevationDeg.toFixed(1)}° · ends {pass.los.toLocaleTimeString()}</span>
+      </div>)}
+      <small>Approximate geometric visibility from current orbital elements; atmosphere, terrain, and sunlight are not included.</small>
+    </div>}
+  </section>;
+}
