@@ -1,4 +1,5 @@
 import express from "express";
+import compression from "compression";
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -24,10 +25,17 @@ const readSpacecraftEphemeris = db.prepare("SELECT payload, fetched_at FROM spac
 const writeSpacecraftEphemeris = db.prepare(`INSERT INTO spacecraft_ephemeris(id,payload,fetched_at) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,fetched_at=excluded.fetched_at`);
 const app = express();
 const PORT = Number(process.env.PORT || 3001);
-const TTL = 2 * 60 * 60 * 1000;
+const TTL = 60 * 60 * 1000;
 const PLANET_EPHEMERIS_TTL = 30 * 60 * 1000;
 const FORCE_REFRESH_COOLDOWN = 60 * 1000;
 const forcedRefreshes = new Map();
+const inFlightRequests = new Map();
+const satelliteResponseBodies = new Map();
+const apiRateWindows = new Map();
+const API_RATE_LIMIT = 120;
+const API_RATE_WINDOW_MS = 60 * 1000;
+const MAX_SATELLITE_RESPONSE_BODIES = 8;
+const REENTRY_TIP_CACHE_KEY = "space-track-tip:upcoming";
 const SPACE_TRACK_URL = "https://www.space-track.org";
 const TLE_API_URL = "https://tle.ivanstanojevic.me/api/tle";
 const HORIZONS_URL = "https://ssd.jpl.nasa.gov/api/horizons.api";
@@ -61,6 +69,40 @@ app.use("/api", (_req, res, next) => {
   res.set("Cache-Control", "no-store");
   next();
 });
+app.use("/api", compression());
+app.use("/api", (req, res, next) => {
+  const now = Date.now();
+  const key = req.ip || req.socket.remoteAddress || "unknown";
+  const existing = apiRateWindows.get(key);
+  const window = existing && now - existing.startedAt < API_RATE_WINDOW_MS
+    ? existing
+    : { startedAt: now, requests: 0 };
+  window.requests += 1;
+  apiRateWindows.set(key, window);
+  res.set("RateLimit-Limit", String(API_RATE_LIMIT));
+  res.set("RateLimit-Remaining", String(Math.max(0, API_RATE_LIMIT - window.requests)));
+  if (window.requests > API_RATE_LIMIT) {
+    res.set("Retry-After", String(Math.ceil((window.startedAt + API_RATE_WINDOW_MS - now) / 1000)));
+    return res.status(429).json({ error: "API request limit exceeded.", details: "Wait for the current one-minute request window to reset." });
+  }
+  if (apiRateWindows.size > 10000) {
+    for (const [address, value] of apiRateWindows) {
+      if (now - value.startedAt >= API_RATE_WINDOW_MS) apiRateWindows.delete(address);
+    }
+  }
+  next();
+});
+function singleFlight(key, task) {
+  const existing = inFlightRequests.get(key);
+  if (existing) return existing;
+  const request = Promise.resolve().then(task);
+  inFlightRequests.set(key, request);
+  request.then(
+    () => { if (inFlightRequests.get(key) === request) inFlightRequests.delete(key); },
+    () => { if (inFlightRequests.get(key) === request) inFlightRequests.delete(key); }
+  );
+  return request;
+}
 function requestHorizons(url) {
   const request = horizonsRequestQueue.then(() => fetch(url, { signal: AbortSignal.timeout(60000) }));
   horizonsRequestQueue = request.then(
@@ -121,6 +163,26 @@ async function readJsonResponse(response, source) {
     const excerpt = body.trim().replace(/\s+/g, " ").slice(0, 160);
     throw new Error(`${source} returned invalid JSON${excerpt ? `: ${excerpt}` : "."}`);
   }
+}
+async function loginSpaceTrack() {
+  const identity = process.env.SPACETRACK_IDENTITY;
+  const password = process.env.SPACETRACK_PASSWORD;
+  if (!identity || !password) {
+    const error = new Error("Space-Track is not configured. Set SPACETRACK_IDENTITY and SPACETRACK_PASSWORD in the server .env file, then restart the server.");
+    error.statusCode = 503;
+    throw error;
+  }
+  const login = await fetch(`${SPACE_TRACK_URL}/ajaxauth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ identity, password }),
+    signal: AbortSignal.timeout(20000)
+  });
+  if (!login.ok) throw new Error(`Space-Track login failed (HTTP ${login.status}). Check the server credentials and account access.`);
+  const cookies = login.headers.getSetCookie?.() ?? [login.headers.get("set-cookie")].filter(Boolean);
+  const cookieHeader = cookies.map(cookie => cookie.split(";")[0]).filter(Boolean).join("; ");
+  if (!cookieHeader) throw new Error("Space-Track login returned no authenticated session.");
+  return cookieHeader;
 }
 async function fetchTleApiPage(search, page) {
   const url = new URL(TLE_API_URL);
@@ -223,40 +285,24 @@ function matchesSpaceTrackGroup(record, group) {
   return false;
 }
 async function fetchSpaceTrackRecords(group, forceRefresh = false) {
-  const identity = process.env.SPACETRACK_IDENTITY;
-  const password = process.env.SPACETRACK_PASSWORD;
-  if (!identity || !password) {
-    const error = new Error("Space-Track is not configured. Set SPACETRACK_IDENTITY and SPACETRACK_PASSWORD in the server .env file, then restart the server.");
-    error.statusCode = 503;
-    throw error;
-  }
-
   const catalogKey = "space-track-catalog:active";
   const cachedCatalog = readCache.get(catalogKey);
   let catalog = cachedCatalog && !forceRefresh && Date.now() - cachedCatalog.fetched_at < TTL
     ? JSON.parse(cachedCatalog.payload)
     : null;
   if (!catalog) {
-    const login = await fetch(`${SPACE_TRACK_URL}/ajaxauth/login`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ identity, password }),
-      signal: AbortSignal.timeout(20000)
+    catalog = await singleFlight(catalogKey, async () => {
+      const cookieHeader = await loginSpaceTrack();
+      const query = `${SPACE_TRACK_URL}/basicspacedata/query/class/gp/DECAY_DATE/null-val/EPOCH/%3Enow-30/ORDERBY/NORAD_CAT_ID/FORMAT/json`;
+      const response = await fetch(query, {
+        headers: { Cookie: cookieHeader, "User-Agent": "SatelliteTracking/1.0" },
+        signal: AbortSignal.timeout(30000)
+      });
+      if (!response.ok) throw new Error(`Space-Track GP query failed (HTTP ${response.status}). Check account access and API availability.`);
+      const fetchedCatalog = parseOmmJson(await readJsonResponse(response, "Space-Track"), "Space-Track");
+      writeCache.run(catalogKey, JSON.stringify(fetchedCatalog), Date.now());
+      return fetchedCatalog;
     });
-    if (!login.ok) throw new Error(`Space-Track login failed (HTTP ${login.status}). Check the server credentials and account access.`);
-
-    const cookies = login.headers.getSetCookie?.() ?? [login.headers.get("set-cookie")].filter(Boolean);
-    const cookieHeader = cookies.map(cookie => cookie.split(";")[0]).filter(Boolean).join("; ");
-    if (!cookieHeader) throw new Error("Space-Track login returned no authenticated session.");
-
-    const query = `${SPACE_TRACK_URL}/basicspacedata/query/class/gp/DECAY_DATE/null-val/EPOCH/%3Enow-30/ORDERBY/NORAD_CAT_ID/FORMAT/json`;
-    const response = await fetch(query, {
-      headers: { Cookie: cookieHeader, "User-Agent": "SatelliteTracking/1.0" },
-      signal: AbortSignal.timeout(30000)
-    });
-    if (!response.ok) throw new Error(`Space-Track GP query failed (HTTP ${response.status}). Check account access and API availability.`);
-    catalog = parseOmmJson(await readJsonResponse(response, "Space-Track"), "Space-Track");
-    writeCache.run(catalogKey, JSON.stringify(catalog), Date.now());
   }
   const records = catalog.filter(record => matchesSpaceTrackGroup(record, group));
   if (!records.length) throw new Error(`Space-Track returned no recent TLE records for the ${GROUPS[group]} group.`);
@@ -398,6 +444,104 @@ app.get("/api/providers", (_req, res) => res.json([
   { id: "celestrak", name: "CelesTrak", configured: true },
   { id: "space-track", name: "Space-Track", configured: Boolean(process.env.SPACETRACK_IDENTITY && process.env.SPACETRACK_PASSWORD) }
 ]));
+app.get("/api/operational-status", (_req, res) => {
+  const now = Date.now();
+  const providerStatus = provider => {
+    const prefix = `${provider}-omm:`;
+    const rows = db.prepare("SELECT group_name, fetched_at FROM tle_cache WHERE group_name LIKE ? ORDER BY fetched_at DESC").all(`${prefix}%`);
+    const latest = rows[0] || null;
+    const configured = provider === "celestrak" || Boolean(process.env.SPACETRACK_IDENTITY && process.env.SPACETRACK_PASSWORD);
+    return {
+      id: provider,
+      name: provider === "celestrak" ? "CelesTrak" : "Space-Track",
+      configured,
+      cacheState: !configured ? "not-configured" : !latest ? "no-cache" : now - latest.fetched_at < TTL ? "fresh-cache" : "stale-cache",
+      lastSuccessfulSync: latest ? new Date(latest.fetched_at).toISOString() : null,
+      cachedGroups: rows.length
+    };
+  };
+  res.json({
+    generatedAt: new Date(now).toISOString(),
+    cacheTtlMinutes: TTL / 60000,
+    providers: [providerStatus("celestrak"), providerStatus("space-track")],
+    reentryTip: {
+      id: "space-track-tip",
+      configured: Boolean(process.env.SPACETRACK_IDENTITY && process.env.SPACETRACK_PASSWORD),
+      endpoint: "/api/reentries"
+    },
+    scope: "Provider configuration and cache freshness are reported here; they do not prove upstream connectivity."
+  });
+});
+app.get("/api/reentries", async (_req, res) => {
+  const now = Date.now();
+  const cached = readCache.get(REENTRY_TIP_CACHE_KEY);
+  if (cached && now - cached.fetched_at < TTL) {
+    return res.json({
+      source: "Space-Track TIP",
+      fetchedAt: new Date(cached.fetched_at).toISOString(),
+      stale: false,
+      count: JSON.parse(cached.payload).length,
+      records: JSON.parse(cached.payload)
+    });
+  }
+  try {
+    const records = await singleFlight(REENTRY_TIP_CACHE_KEY, async () => {
+      const cookieHeader = await loginSpaceTrack();
+      const query = `${SPACE_TRACK_URL}/basicspacedata/query/class/tip/DECAY_EPOCH/%3Enow/orderby/DECAY_EPOCH%20asc/limit/250/format/json`;
+      const response = await fetch(query, {
+        headers: { Cookie: cookieHeader, "User-Agent": "SatelliteTracking/1.0" },
+        signal: AbortSignal.timeout(30000)
+      });
+      if (!response.ok) throw new Error(`Space-Track TIP query failed (HTTP ${response.status}).`);
+      const payload = await readJsonResponse(response, "Space-Track TIP");
+      if (!Array.isArray(payload)) throw new Error("Space-Track TIP returned an invalid response.");
+      const normalized = payload.flatMap(record => {
+        const noradId = String(record.NORAD_CAT_ID ?? "").trim();
+        const predictedDecay = String(record.DECAY_EPOCH ?? "").trim();
+        if (!/^\d+$/.test(noradId) || !Number.isFinite(Date.parse(predictedDecay))) return [];
+        return [{
+          noradId,
+          name: String(record.OBJECT_NAME ?? "").trim() || null,
+          predictedDecay,
+          messageEpoch: String(record.MSG_EPOCH ?? "").trim() || null,
+          predictionWindow: record.WINDOW ?? null,
+          direction: record.DIRECTION ?? null,
+          latitude: record.LAT ?? null,
+          longitude: record.LON ?? null,
+          source: "Space-Track TIP"
+        }];
+      });
+      writeCache.run(REENTRY_TIP_CACHE_KEY, JSON.stringify(normalized), Date.now());
+      return normalized;
+    });
+    const cache = readCache.get(REENTRY_TIP_CACHE_KEY);
+    return res.json({
+      source: "Space-Track TIP",
+      fetchedAt: cache ? new Date(cache.fetched_at).toISOString() : new Date().toISOString(),
+      stale: false,
+      count: records.length,
+      records
+    });
+  } catch (error) {
+    console.error(`[Space-Track TIP] ${error.message}`);
+    if (cached) {
+      const records = JSON.parse(cached.payload);
+      return res.json({
+        source: "Space-Track TIP",
+        fetchedAt: new Date(cached.fetched_at).toISOString(),
+        stale: true,
+        warning: error.message,
+        count: records.length,
+        records
+      });
+    }
+    return res.status(error.statusCode || 502).json({
+      error: "Space-Track re-entry predictions are unavailable.",
+      details: error.message,
+      suggestion: "TIP data requires configured Space-Track credentials and current provider availability."
+    });
+  }
+});
 app.get("/api/planet-positions", async (req, res) => {
   const cached = readPlanetEphemeris.get();
   const now = Date.now();
@@ -527,14 +671,35 @@ app.get("/api/satellites", async (req, res) => {
     }
     forcedRefreshes.set(cacheKey, now);
   }
+  const sendSatelliteResponse = (payload, cache = true) => {
+    if (!forceRefresh && cache && !payload.stale) {
+      res.set("Cache-Control", "private, max-age=300");
+      const body = JSON.stringify(payload);
+      satelliteResponseBodies.delete(cacheKey);
+      satelliteResponseBodies.set(cacheKey, { fetchedAt: payload.fetchedAt, body });
+      while (satelliteResponseBodies.size > MAX_SATELLITE_RESPONSE_BODIES) {
+        satelliteResponseBodies.delete(satelliteResponseBodies.keys().next().value);
+      }
+      return res.type("json").send(body);
+    }
+    return res.json(payload);
+  };
   if (!forceRefresh && cached && now - cached.fetched_at < TTL) {
+    const fetchedAt = new Date(cached.fetched_at).toISOString();
+    const cachedResponse = satelliteResponseBodies.get(cacheKey);
+    if (cachedResponse?.fetchedAt === fetchedAt) {
+      satelliteResponseBodies.delete(cacheKey);
+      satelliteResponseBodies.set(cacheKey, cachedResponse);
+      res.set("Cache-Control", "private, max-age=300");
+      return res.type("json").send(cachedResponse.body);
+    }
     const satellites = JSON.parse(cached.payload);
     const format = satellites[0]?.omm ? "OMM" : "TLE";
     const usedTleFallback = provider === "celestrak" && format === "TLE";
-    return res.json({
+    return sendSatelliteResponse({
       group, groupName: GROUPS[group], provider,
       providerName: usedTleFallback ? "TLE API fallback" : providerName,
-      format, fetchedAt: new Date(cached.fetched_at).toISOString(), stale: false,
+      format, fetchedAt, stale: false,
       source: usedTleFallback ? "TLE API cache" : "sqlite-cache",
       warning: usedTleFallback ? "Using the cached free TLE API fallback; legacy TLE format cannot include catalog numbers above 99,999." : undefined,
       count: satellites.length, satellites
@@ -547,11 +712,11 @@ app.get("/api/satellites", async (req, res) => {
       satellites = await fetchSpaceTrackRecords(group, forceRefresh);
     } else if (Date.now() < celestrakBlockedUntil) {
       celestrakError = "CelesTrak requests are temporarily paused after an HTTP 403 response.";
-      const fallback = await fetchTleApiRecords(group);
+      const fallback = await singleFlight(`tle-api-fallback:${group}`, () => fetchTleApiRecords(group));
       satellites = fallback.satellites;
       const fetchedAt = Date.now();
       writeCache.run(cacheKey, JSON.stringify(satellites), fetchedAt);
-      return res.json({
+      return sendSatelliteResponse({
         group, groupName: GROUPS[group], provider, providerName: "TLE API fallback", format: "TLE",
         fetchedAt: new Date(fetchedAt).toISOString(), stale: false, source: "TLE API",
         warning: `${celestrakError} Legacy TLE format cannot include catalog numbers above 99,999.${fallback.warning ? ` ${fallback.warning}` : ""}`,
@@ -559,27 +724,29 @@ app.get("/api/satellites", async (req, res) => {
       });
     } else {
       const url = `https://celestrak.org/NORAD/elements/gp.php?GROUP=${encodeURIComponent(group.toUpperCase())}&FORMAT=JSON`;
-      const upstream = await fetch(url, { signal: AbortSignal.timeout(30000), headers: { "Accept": "application/json", "User-Agent": "SatelliteTracking/1.0" } });
-      if (!upstream.ok) {
-        if (upstream.status === 403) celestrakBlockedUntil = Date.now() + 24 * 60 * 60 * 1000;
-        throw new Error(`CelesTrak returned HTTP ${upstream.status}.`);
-      }
-      satellites = parseOmmJson(await readJsonResponse(upstream, "CelesTrak"));
+      satellites = await singleFlight(cacheKey, async () => {
+        const upstream = await fetch(url, { signal: AbortSignal.timeout(30000), headers: { "Accept": "application/json", "User-Agent": "SatelliteTracking/1.0" } });
+        if (!upstream.ok) {
+          if (upstream.status === 403) celestrakBlockedUntil = Date.now() + 24 * 60 * 60 * 1000;
+          throw new Error(`CelesTrak returned HTTP ${upstream.status}.`);
+        }
+        return parseOmmJson(await readJsonResponse(upstream, "CelesTrak"));
+      });
     }
     const fetchedAt = Date.now();
     writeCache.run(cacheKey, JSON.stringify(satellites), fetchedAt);
     const format = satellites[0]?.omm ? "OMM" : "TLE";
     const source = provider === "celestrak" ? "CelesTrak OMM JSON" : "Space-Track GP OMM JSON";
-    res.json({ group, groupName: GROUPS[group], provider, providerName, format, fetchedAt: new Date(fetchedAt).toISOString(), stale: false, source, count: satellites.length, satellites });
+    sendSatelliteResponse({ group, groupName: GROUPS[group], provider, providerName, format, fetchedAt: new Date(fetchedAt).toISOString(), stale: false, source, count: satellites.length, satellites });
   } catch (error) {
     console.error(`[${providerName}] ${group}: ${error.message}`);
     if (provider === "celestrak") {
       celestrakError = error.message;
       try {
-        const fallback = await fetchTleApiRecords(group);
+        const fallback = await singleFlight(`tle-api-fallback:${group}`, () => fetchTleApiRecords(group));
         const fetchedAt = Date.now();
         writeCache.run(cacheKey, JSON.stringify(fallback.satellites), fetchedAt);
-        return res.json({
+        return sendSatelliteResponse({
           group, groupName: GROUPS[group], provider, providerName: "TLE API fallback", format: "TLE",
           fetchedAt: new Date(fetchedAt).toISOString(), stale: false, source: "TLE API",
           warning: `${celestrakError} Using the free TLE API fallback; legacy TLE format cannot include catalog numbers above 99,999.${fallback.warning ? ` ${fallback.warning}` : ""}`,
@@ -593,9 +760,9 @@ app.get("/api/satellites", async (req, res) => {
     if (fallbackCache) {
       const satellites = JSON.parse(fallbackCache.payload);
       const format = satellites[0]?.omm ? "OMM" : "TLE";
-      return res.json({ group, groupName: GROUPS[group], provider, providerName, format, fetchedAt: new Date(fallbackCache.fetched_at).toISOString(), stale: true, source: "sqlite-stale-cache", warning: celestrakError || error.message, count: satellites.length, satellites });
+      return sendSatelliteResponse({ group, groupName: GROUPS[group], provider, providerName, format, fetchedAt: new Date(fallbackCache.fetched_at).toISOString(), stale: true, source: "sqlite-stale-cache", warning: celestrakError || error.message, count: satellites.length, satellites }, false);
     }
-    res.status(error.statusCode || 502).json({ error: `${providerName} satellite data is unavailable and no provider-specific cached copy exists.`, details: celestrakError || error.message, suggestion: "Check provider availability and server configuration, then retry. Successful data is cached for two hours." });
+    res.status(error.statusCode || 502).json({ error: `${providerName} satellite data is unavailable and no provider-specific cached copy exists.`, details: celestrakError || error.message, suggestion: "Check provider availability and server configuration, then retry. Successful data is cached for one hour." });
   }
 });
 const dist = path.resolve(here, "../dist");

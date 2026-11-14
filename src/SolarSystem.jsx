@@ -1167,11 +1167,11 @@ export default function SolarSystem() {
   useEffect(() => {
     const updateMarkers = () => {
       const markers = satelliteLayer.current;
-      if (!markers) return;
+      if (!markers || !markers.geometry?.attributes?.position || !markers.geometry?.attributes?.color) return;
 
       const positions = markers.geometry.attributes.position;
       const colors = markers.geometry.attributes.color;
-      const visibleRecords = satelliteRecords.current.slice(0, 2500);
+      const visibleRecords = Array.isArray(satelliteRecords.current) ? satelliteRecords.current.slice(0, 2500) : [];
       let count = 0;
       const now = new Date();
 

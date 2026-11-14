@@ -1,14 +1,42 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Globe from "globe.gl";
-import { ShaderMaterial, SRGBColorSpace, TextureLoader, Vector2 } from "three";
+import { BufferGeometry, Line, LineBasicMaterial, ShaderMaterial, SRGBColorSpace, TextureLoader, Vector2, Vector3 } from "three";
 import CITY_DATA_URL from "../node_modules/globe.gl/example/datasets/ne_110m_populated_places_simple.geojson?url";
+import WORLD_COUNTRIES_URL from "../node_modules/globe.gl/example/datasets/ne_110m_admin_0_countries.geojson?url";
 import NIGHT_TEXTURE from "../node_modules/three-globe/example/img/earth-night.jpg?url";
 import STARFIELD_TEXTURE from "../node_modules/three-globe/example/img/night-sky.png?url";
-import { GROUPS, fetchDataProviders, fetchSatelliteRecords, calculateSatellite, calculateOrbitTrack, calculatePasses, exportSatellitesCsv } from "./satelliteData.js";
+import { GROUPS, fetchDataProviders, fetchSatelliteRecords, calculateOrbitTrack, calculateOrbitalTrajectory, splitOrbitTrackAtAntimeridian, calculatePasses, exportSatellitesCsv } from "./satelliteData.js";
 const DAY_TEXTURE = "/images/nasa-blue-marble-2048.jpg";
 const COLORS = { LEO: "#2dd4bf", MEO: "#fbbf24", GEO: "#a78bfa" };
 const fmt = (n, d = 1) => Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: d, minimumFractionDigits: d }) : "—";
 const normalizeSearch = value => value.toLowerCase().replace(/[^a-z0-9]/g, "");
+function getCountryOutlines(geoJson) {
+  return geoJson.features.flatMap(feature => {
+    const geometry = feature.geometry;
+    const polygons = geometry?.type === "Polygon"
+      ? [geometry.coordinates]
+      : geometry?.type === "MultiPolygon"
+        ? geometry.coordinates
+        : [];
+    return polygons.map(polygon => {
+      let crossesDateLine = false;
+      const path = polygon.map(ring => {
+        let previousLongitude = null;
+        const commands = [];
+        for (const [longitude, latitude] of ring) {
+          const x = ((longitude + 180) / 360) * 900;
+          const y = ((90 - latitude) / 180) * 420;
+          const crosses = previousLongitude !== null && Math.abs(longitude - previousLongitude) > 180;
+          if (crosses) crossesDateLine = true;
+          commands.push(`${previousLongitude === null || crosses ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`);
+          previousLongitude = longitude;
+        }
+        return commands.length > 1 ? `${commands.join(" ")} Z` : "";
+      }).filter(Boolean).join(" ");
+      return { path, fill: !crossesDateLine };
+    }).filter(polygon => polygon.path);
+  });
+}
 const EXTRA_CITIES = [
   { name: "Chennai", lat: 13.0827, lng: 80.2707, population: 11000000 },
   { name: "Hyderabad", lat: 17.385, lng: 78.4867, population: 10500000 },
@@ -125,6 +153,7 @@ function getSolarPosition(date) {
 }
 export default function EarthGlobe() {
   const host = useRef(null), globe = useRef(null), globeMaterial = useRef(null), recordsRef = useRef([]), autoFocusedId = useRef(""), fullCatalogPreviousSelection = useRef(null);
+  const positionWorkerRef = useRef(null), workerRecordsRef = useRef(null), calculationRecordsRef = useRef(null), positionWorkerBusyRef = useRef(false), pendingPositionUpdateRef = useRef(false);
   const [group, setGroup] = useState("active"), [provider, setProvider] = useState("space-track"), [propagationModel, setPropagationModel] = useState("sgp4"), [providerAvailability, setProviderAvailability] = useState(null), [providerStatusError, setProviderStatusError] = useState(""), [satellites, setSatellites] = useState([]), [selectedId, setSelectedId] = useState("");
   const [search, setSearch] = useState(""), [searchFullCatalog, setSearchFullCatalog] = useState(false), [orbitType, setOrbitType] = useState("ALL"), [objectTypeFilter, setObjectTypeFilter] = useState("ALL"), [minAlt, setMinAlt] = useState("0"), [maxAlt, setMaxAlt] = useState("40000");
   const [searchOpen, setSearchOpen] = useState(false), [activeSuggestion, setActiveSuggestion] = useState(-1);
@@ -132,23 +161,103 @@ export default function EarthGlobe() {
   const [coordinateCopyStatus, setCoordinateCopyStatus] = useState("");
   const [pathLimit, setPathLimit] = useState("25"), [visibleRows, setVisibleRows] = useState(100), [status, setStatus] = useState("Connecting to API…"), [error, setError] = useState(""), [dataInfo, setDataInfo] = useState(null), [updatedAt, setUpdatedAt] = useState(null), [isLoadingData, setIsLoadingData] = useState(false), [tick, setTick] = useState(0);
   const [cityCatalog, setCityCatalog] = useState([]), [cityLimit, setCityLimit] = useState(60), [showCityLabels, setShowCityLabels] = useState(true);
+  const [countryOutlines, setCountryOutlines] = useState([]);
   const [solarClock, setSolarClock] = useState(() => Date.now());
+  const [operationalStatus, setOperationalStatus] = useState(null);
+  const [operationalStatusError, setOperationalStatusError] = useState("");
+  const [reentryData, setReentryData] = useState(null);
+  const [reentryError, setReentryError] = useState("");
+  const [isLoadingReentries, setIsLoadingReentries] = useState(false);
+  const reentryRequestRef = useRef(null);
+  const propagationModelRef = useRef(propagationModel);
   const spaceTrackConfigured = providerAvailability?.find(item => item.id === "space-track")?.configured === true;
-  const automaticRefreshDelay = error || dataInfo?.stale ? 5 * 60 * 1000 : 2 * 60 * 60 * 1000 + 60 * 1000;
+  const automaticRefreshDelay = error || dataInfo?.stale ? 5 * 60 * 1000 : 60 * 60 * 1000 + 60 * 1000;
   const solarPosition = useMemo(() => getSolarPosition(new Date(solarClock)), [solarClock]);
   const cityLabels = useMemo(() => showCityLabels ? cityCatalog.slice(0, cityLimit).map(city => {
     const toRad = Math.PI / 180;
     const daylight = Math.sin(city.lat * toRad) * Math.sin(solarPosition.lat * toRad) + Math.cos(city.lat * toRad) * Math.cos(solarPosition.lat * toRad) * Math.cos((city.lng - solarPosition.lng) * toRad);
     return { ...city, isNight: daylight < -0.05 };
   }) : [], [cityCatalog, cityLimit, showCityLabels, solarPosition]);
+  const recalcRef = useRef(() => {});
+  const createPositionWorker = useCallback(() => {
+    const worker = new Worker(new URL("./positionWorker.js", import.meta.url), { type: "module" });
+    worker.onmessage = ({ data }) => {
+      if (data.type === "progress") {
+        if (calculationRecordsRef.current === recordsRef.current) {
+          setStatus(`Calculating positions: ${data.completed.toLocaleString()} / ${data.total.toLocaleString()}`);
+        }
+        return;
+      }
+      if (data.type !== "complete") return;
+      const sourceRecords = calculationRecordsRef.current;
+      const isCurrent = sourceRecords === recordsRef.current && data.algorithm === propagationModelRef.current;
+      positionWorkerBusyRef.current = false;
+      calculationRecordsRef.current = null;
+      if (isCurrent) {
+        const rows = data.rows.map(({ index, ...calculated }) => ({ ...sourceRecords[index], ...calculated }));
+        setSatellites(rows);
+        const updatedAt = new Date(data.startedAt);
+        setUpdatedAt(updatedAt);
+        setError("");
+        const modelName = data.algorithm === "fg" ? "F&G two-body" : "SGP4";
+        const duration = (data.durationMs / 1000).toFixed(1);
+        setStatus(`Tracking ${rows.length.toLocaleString()} satellites with ${modelName} · updated in ${duration}s`);
+        if (data.failedRecords) {
+          console.warn(`${data.failedRecords.toLocaleString()} satellite positions could not be calculated.`);
+        }
+      } else if (recordsRef.current.length) {
+        pendingPositionUpdateRef.current = true;
+      }
+      if (pendingPositionUpdateRef.current) {
+        pendingPositionUpdateRef.current = false;
+        recalcRef.current();
+      }
+    };
+    worker.onerror = event => {
+      positionWorkerBusyRef.current = false;
+      workerRecordsRef.current = null;
+      calculationRecordsRef.current = null;
+      pendingPositionUpdateRef.current = false;
+      if (positionWorkerRef.current === worker) positionWorkerRef.current = null;
+      worker.terminate();
+      setError(`Satellite position calculation failed: ${event.message}`);
+      setStatus("Satellite position calculation failed");
+    };
+    positionWorkerRef.current = worker;
+    return worker;
+  }, []);
   const recalc = useCallback(() => {
-    if (!recordsRef.current.length) return;
-    const now = new Date(), rows = [];
-    for (const record of recordsRef.current) { try { const sat = calculateSatellite(record, now, propagationModel); if (sat) rows.push(sat); } catch (error) { console.error(`Unable to calculate ${propagationModel} position for NORAD ${record.noradId}:`, error); } }
-    setSatellites(rows); setUpdatedAt(now); setStatus(`Tracking ${rows.length.toLocaleString()} satellites with ${propagationModel === "fg" ? "F&G two-body" : "SGP4"}`);
-  }, [propagationModel]);
-  const recalcRef = useRef(recalc);
+    const records = recordsRef.current;
+    if (!records.length) return;
+    if (positionWorkerBusyRef.current) {
+      pendingPositionUpdateRef.current = true;
+      return;
+    }
+    const now = new Date();
+    try {
+      const worker = positionWorkerRef.current || createPositionWorker();
+      const includeRecords = workerRecordsRef.current !== records;
+      positionWorkerBusyRef.current = true;
+      calculationRecordsRef.current = records;
+      workerRecordsRef.current = records;
+      setStatus(`Calculating positions for ${records.length.toLocaleString()} satellites…`);
+      worker.postMessage({
+        type: "calculate",
+        records: includeRecords ? records : null,
+        startedAt: now.toISOString(),
+        algorithm: propagationModel
+      });
+    } catch (error) {
+      positionWorkerBusyRef.current = false;
+      calculationRecordsRef.current = null;
+      workerRecordsRef.current = null;
+      setError(`Unable to start satellite position calculation: ${error.message}`);
+      setStatus("Satellite position calculation failed");
+    }
+  }, [createPositionWorker, propagationModel]);
   useEffect(() => { recalcRef.current = recalc; }, [recalc]);
+  useEffect(() => { propagationModelRef.current = propagationModel; }, [propagationModel]);
+  useEffect(() => () => positionWorkerRef.current?.terminate(), []);
   const load = useCallback(async (signal, forceRefresh = false, preserveExisting = false) => {
     setIsLoadingData(true); setError(""); setStatus(forceRefresh ? "Refreshing orbital data…" : "Loading orbital elements…");
     if (!preserveExisting) { setSatellites([]); recordsRef.current = []; setSelectedId(""); setDataInfo(null); }
@@ -182,6 +291,30 @@ export default function EarthGlobe() {
     return () => controller.abort();
   }, []);
   useEffect(() => {
+    let controller = new AbortController();
+    const refreshStatus = async () => {
+      try {
+        const response = await fetch("/api/operational-status", { signal: controller.signal, cache: "no-store" });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.details || payload.error || `API error ${response.status}`);
+        setOperationalStatus(payload);
+        setOperationalStatusError("");
+      } catch (error) {
+        if (error.name !== "AbortError") setOperationalStatusError(error.message || "Operational status is unavailable.");
+      }
+    };
+    refreshStatus();
+    const timer = window.setInterval(() => {
+      controller.abort();
+      controller = new AbortController();
+      refreshStatus();
+    }, 60_000);
+    return () => {
+      window.clearInterval(timer);
+      controller.abort();
+    };
+  }, []);
+  useEffect(() => {
     const controller = new AbortController();
     fetch(CITY_DATA_URL, { signal: controller.signal })
       .then(response => { if (!response.ok) throw new Error(`City data request failed (${response.status})`); return response.json(); })
@@ -200,9 +333,18 @@ export default function EarthGlobe() {
       .catch(error => { if (error.name !== "AbortError") console.error("Unable to load populated places", error); });
     return () => controller.abort();
   }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(WORLD_COUNTRIES_URL, { signal: controller.signal })
+      .then(response => { if (!response.ok) throw new Error(`World map data request failed (${response.status})`); return response.json(); })
+      .then(data => setCountryOutlines(getCountryOutlines(data)))
+      .catch(error => { if (error.name !== "AbortError") console.error("Unable to load world map outlines", error); });
+    return () => controller.abort();
+  }, []);
   useEffect(() => { const id = setInterval(() => setTick(x => x + 1), 15000); return () => clearInterval(id); }, []);
   useEffect(() => { const id = setInterval(() => setSolarClock(Date.now()), 60000); return () => clearInterval(id); }, []);
   useEffect(() => { if (recordsRef.current.length) recalc(); }, [tick, recalc]);
+  useEffect(() => () => reentryRequestRef.current?.abort(), []);
   useEffect(() => {
     if (!host.current) return;
     const world = Globe()(host.current); globe.current = world;
@@ -213,7 +355,24 @@ export default function EarthGlobe() {
       .pointRadius(d => d.noradId === selectedId ? .24 : .10).pointColor(d => d.noradId === selectedId ? "#fff" : COLORS[d.orbitType])
       .pointLabel(d => `<div style="padding:8px;color:#e8f4ff;background:#071426;border:1px solid #2dd4bf;border-radius:8px"><b>${String(d.name).replace(/[<>]/g, "")}</b><br>NORAD ${d.noradId}<br>${d.orbitType} · ${fmt(d.altitudeKm, 0)} km</div>`)
       .onPointClick(p => setSelectedId(p.noradId)).pathsData([]).pathPoints("coords").pathPointLat(p => p[0]).pathPointLng(p => p[1]).pathPointAlt(p => p[2])
-      .pathColor(p => p.noradId === selectedId ? "#fff" : COLORS[p.orbitType]).pathStroke(p => p.noradId === selectedId ? 1.4 : .45).pathResolution(3).pathLabel(p => `${p.name} · ${p.orbitType} predicted orbit`)
+      .pathColor(p => p.noradId === selectedId ? "#fff" : COLORS[p.orbitType]).pathStroke(p => p.noradId === selectedId ? 1.4 : .45).pathResolution(.35).pathLabel(p => `${p.name} · ${p.orbitType}${p.fullOrbit ? " · one-period Earth-fixed ground track" : " predicted orbit preview"}`)
+      .customLayerData([])
+      .customThreeObject(() => new Line(new BufferGeometry(), new LineBasicMaterial({
+        color: "#ffffff",
+        transparent: true,
+        opacity: 0.82,
+        depthTest: false,
+        depthWrite: false
+      })))
+      .customThreeObjectUpdate((object, orbit) => {
+        const points = orbit.coords.map(([latitude, longitude, altitude]) => {
+          const position = world.getCoords(latitude, longitude, altitude);
+          return new Vector3(position.x, position.y, position.z);
+        });
+        object.renderOrder = 10;
+        object.geometry.setFromPoints(points);
+        object.geometry.computeBoundingSphere();
+      })
       .htmlElementsData([]).htmlLat("lat").htmlLng("lng").htmlAltitude(0.016).htmlElement(city => {
         const element = document.createElement("div");
         const color = city.isNight ? "#ffd28a" : "#c2ddf2";
@@ -291,14 +450,24 @@ export default function EarthGlobe() {
       return comparison * (sort.direction === "asc" ? 1 : -1);
     });
   }, [filtered, sort]);
-  const objectCounts = useMemo(() => satellites.reduce((counts, item) => {
-    const type = String(item.omm?.OBJECT_TYPE || "").toUpperCase();
-    if (type === "DEBRIS") {
-      counts.debris += 1;
-      if (item.perigeeAltitudeKm >= 0 && item.perigeeAltitudeKm < 200) counts.lowPerigeeDebris += 1;
-    } else if (type === "ROCKET BODY") counts.rocketBodies += 1;
+  const objectCounts = useMemo(() => {
+    const counts = { debris: 0, rocketBodies: 0, payloads: 0, lowPerigeeDebris: 0, staleDebris: 0, watchlist: [] };
+    for (const item of satellites) {
+      const type = String(item.omm?.OBJECT_TYPE || "").toUpperCase();
+      if (type === "DEBRIS") {
+        counts.debris += 1;
+        if (item.elementFreshness === "stale") counts.staleDebris += 1;
+        if (item.perigeeAltitudeKm >= 0 && item.perigeeAltitudeKm < 200) {
+          counts.lowPerigeeDebris += 1;
+          counts.watchlist.push(item);
+        }
+      } else if (type === "ROCKET BODY") counts.rocketBodies += 1;
+      else if (type === "PAYLOAD") counts.payloads += 1;
+    }
+    counts.watchlist.sort((left, right) => left.perigeeAltitudeKm - right.perigeeAltitudeKm);
+    counts.watchlist = counts.watchlist.slice(0, 5);
     return counts;
-  }, { debris: 0, rocketBodies: 0, lowPerigeeDebris: 0 }), [satellites]);
+  }, [satellites]);
   const searchSuggestions = useMemo(() => searchQuery ? filtered.slice(0, 6) : [], [filtered, searchQuery]);
   const searchMatch = searchQuery ? filtered[0] || null : null;
   useEffect(() => { setVisibleRows(100); }, [searchQuery, orbitType, objectTypeFilter, minAlt, maxAlt, group]);
@@ -314,8 +483,37 @@ export default function EarthGlobe() {
   const selected = filtered.find(s => s.noradId === selectedId) || satellites.find(s => s.noradId === selectedId) || null;
   useEffect(() => { setCoordinateCopyStatus(""); }, [selectedId]);
   const points = useMemo(() => filtered.slice(0, 2500), [filtered]);
-  const paths = useMemo(() => { const n = pathLimit === "all" ? 2500 : Number(pathLimit), candidates = filtered.slice(0, n), now = new Date(); return candidates.flatMap(s => { const coords = calculateOrbitTrack(s, now, 100, 5, propagationModel); return coords.length > 1 ? [{ name: s.name, noradId: s.noradId, orbitType: s.orbitType, coords }] : []; }); }, [filtered, pathLimit, propagationModel]);
-  useEffect(() => { if (globe.current) { globe.current.pointRadius(d => d.noradId === selectedId ? .24 : .10).pointColor(d => d.noradId === selectedId ? "#fff" : COLORS[d.orbitType]).pathColor(p => p.noradId === selectedId ? "#fff" : COLORS[p.orbitType]).pathStroke(p => p.noradId === selectedId ? 1.4 : .45).pointsData(points).pathsData(paths); } }, [points, paths, selectedId]);
+  const paths = useMemo(() => {
+    const n = pathLimit === "all" ? 2500 : Number(pathLimit);
+    const candidates = filtered.slice(0, n).filter(satellite => satellite.noradId !== selectedId);
+    const selectedSatellite = satellites.find(satellite => satellite.noradId === selectedId);
+    const now = new Date();
+    return candidates.flatMap(s => {
+      const coords = calculateOrbitTrack(s, now, 100, 5, propagationModel);
+      return splitOrbitTrackAtAntimeridian(coords).map(segment => ({
+        name: s.name,
+        noradId: s.noradId,
+        orbitType: s.orbitType,
+        coords: segment
+      }));
+    });
+  }, [filtered, pathLimit, propagationModel, selectedId, satellites]);
+  const selectedOrbit = useMemo(() => {
+    const selectedSatellite = satellites.find(satellite => satellite.noradId === selectedId);
+    if (!selectedSatellite) return [];
+    const coords = calculateOrbitalTrajectory(selectedSatellite, new Date(), 720, propagationModel);
+    return coords.length > 1 ? [{ ...selectedSatellite, coords }] : [];
+  }, [propagationModel, selectedId, satellites]);
+  useEffect(() => {
+    if (!globe.current) return;
+    globe.current.pointRadius(d => d.noradId === selectedId ? .24 : .10)
+      .pointColor(d => d.noradId === selectedId ? "#fff" : COLORS[d.orbitType])
+      .pathColor(p => COLORS[p.orbitType])
+      .pathStroke(.45)
+      .pointsData(points)
+      .pathsData(paths)
+      .customLayerData(selectedOrbit);
+  }, [points, paths, selectedId, selectedOrbit]);
   const focus = sat => { setSelectedId(sat.noradId); globe.current?.pointOfView({ lat: sat.lat, lng: sat.lng, altitude: 1.5 }, 800); };
   const resetGlobeView = () => {
     const nightLongitude = solarPosition.lng > 0 ? solarPosition.lng - 180 : solarPosition.lng + 180;
@@ -369,8 +567,98 @@ export default function EarthGlobe() {
       setCoordinateCopyStatus(`Could not copy coordinates: ${error.message}`);
     }
   };
+  const loadReentries = async () => {
+    reentryRequestRef.current?.abort();
+    const controller = new AbortController();
+    reentryRequestRef.current = controller;
+    setIsLoadingReentries(true);
+    setReentryError("");
+    try {
+      const response = await fetch("/api/reentries", { signal: controller.signal, cache: "no-store" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.details || payload.error || `API error ${response.status}`);
+      setReentryData(payload);
+    } catch (error) {
+      if (error.name !== "AbortError") setReentryError(error.message || "Space-Track TIP data is unavailable.");
+    } finally {
+      if (!controller.signal.aborted) setIsLoadingReentries(false);
+    }
+  };
+  const formatCacheStatus = providerId => {
+    const providerInfo = operationalStatus?.providers?.find(item => item.id === providerId);
+    if (!providerInfo) return "Checking cache status…";
+    if (!providerInfo.configured) return "Not configured";
+    if (providerInfo.cacheState === "no-cache") return "No cached sync yet";
+    const cacheAge = Math.max(0, Date.now() - Date.parse(providerInfo.lastSuccessfulSync));
+    const ageMinutes = Math.floor(cacheAge / 60_000);
+    const ageLabel = ageMinutes < 60 ? `${ageMinutes} min ago` : `${Math.floor(ageMinutes / 60)} h ago`;
+    return `${providerInfo.cacheState === "fresh-cache" ? "Cached" : "Stale cache"} · ${ageLabel}`;
+  };
+  const missionMapTrack = useMemo(() => {
+    const trackedSatellite = selected ? satellites.find(satellite => satellite.noradId === selectedId) : filtered[0];
+    if (!trackedSatellite) return "";
+    const coords = calculateOrbitalTrajectory(trackedSatellite, new Date(), 240, propagationModel);
+    if (!coords.length) return "";
+    return coords
+      .map(([latitude, longitude]) => `${((longitude + 180) / 360) * 100},${((90 - latitude) / 180) * 100}`)
+      .join(" ");
+  }, [filtered, propagationModel, selected, selectedId, satellites]);
+  const missionMapSatellites = useMemo(() => {
+    const focusId = selected?.noradId || filtered[0]?.noradId || "";
+    return filtered.slice(0, 2500).map(satellite => ({
+      ...satellite,
+      x: ((satellite.lng + 180) / 360) * 100,
+      y: ((90 - satellite.lat) / 180) * 100,
+      color: COLORS[satellite.orbitType] || "#71e6d1",
+      active: satellite.noradId === focusId
+    }));
+  }, [filtered, selected?.noradId]);
   return <section className="tracker">
     <div className="section-heading"><div><p className="eyebrow">LIVE ORBITAL VIEW</p><h2>3D Satellite Orbit Viewer</h2><p className="muted">Drag to rotate · Scroll to zoom · Click a satellite to inspect it</p></div><div className="status-pill"><i className={error ? "status-dot error-dot" : "status-dot"}/>{error ? "DATA OFFLINE" : dataInfo?.stale ? "CACHED DATA" : "SYSTEM STATUS"}</div></div>
+    <div className="mission-map-panel">
+      <div className="mission-map-header">
+        <div>
+          <p className="eyebrow">ORBITAL ANALYSIS</p>
+          <h3>Satellite Constellation World Map</h3>
+        </div>
+        <div className="mission-map-badges">
+          <span>{propagationModel === "fg" ? "F&G TWO-BODY" : "SGP4"}</span>
+          <span>{dataInfo?.providerName || "Space-Track"}</span>
+          <span>{Math.min(filtered.length, 2500).toLocaleString()} / {filtered.length.toLocaleString()} ON MAP</span>
+          <span>{selected ? selected.name : "Select a satellite"}</span>
+        </div>
+      </div>
+      <div className="mission-map-wrap">
+        <svg viewBox="0 0 900 420" className="world-map-svg" preserveAspectRatio="xMidYMid meet" aria-label="World map showing satellite constellation positions and ground tracks">
+          <defs>
+            <linearGradient id="mapGlow" x1="0%" x2="100%" y1="0%" y2="0%">
+              <stop offset="0%" stopColor="#071b2d" />
+              <stop offset="55%" stopColor="#0d2336" />
+              <stop offset="100%" stopColor="#09131d" />
+            </linearGradient>
+          </defs>
+          <rect x="0" y="0" width="900" height="420" rx="18" fill="url(#mapGlow)" />
+          {[0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330, 360].map(longitude => {
+            const x = (longitude + 180) / 360 * 900;
+            return <line key={`lon-${longitude}`} x1={x} y1="0" x2={x} y2="420" stroke="rgba(110, 170, 208, 0.18)" strokeWidth="1" />;
+          })}
+          {[0, 30, 60, 90].map(latitude => {
+            const y = ((90 - latitude) / 180) * 420;
+            return <line key={`lat-${latitude}`} x1="0" y1={y} x2="900" y2={y} stroke="rgba(110, 170, 208, 0.18)" strokeWidth="1" />;
+          })}
+          {countryOutlines.map((country, index) => <path key={`country-${index}`} d={country.path} fill={country.fill ? "rgba(48, 119, 133, 0.42)" : "none"} fillRule="evenodd" stroke="rgba(126, 179, 196, 0.58)" strokeWidth="1" vectorEffect="non-scaling-stroke" />)}
+          {missionMapTrack && <polyline points={missionMapTrack} fill="none" stroke="#7dd3fc" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" opacity="0.92" />}
+          {missionMapSatellites.map(satellite => <g key={satellite.noradId}>
+            <circle cx={`${satellite.x}%`} cy={`${satellite.y}%`} r={satellite.active ? 6 : 4} fill={satellite.color} opacity={satellite.active ? 1 : 0.7} />
+            {satellite.active && <circle cx={`${satellite.x}%`} cy={`${satellite.y}%`} r={13} fill="none" stroke="#e8f2ff" strokeWidth="1.5" opacity="0.8" />}
+          </g>)}
+          <g>
+            <text x="24" y="36" fill="#c4d8ef" fontSize="11" fontFamily="DM Mono, monospace" letterSpacing="2">WORLD MAP</text>
+            <text x="24" y="392" fill="#9bb0c1" fontSize="10" fontFamily="DM Mono, monospace" letterSpacing="2">LAT / LON GRID</text>
+          </g>
+        </svg>
+      </div>
+    </div>
     <div className="toolbar">
       <label className="field"><span>Data provider</span><select value={provider} onChange={event => { setProvider(event.target.value); setSearchFullCatalog(false); fullCatalogPreviousSelection.current = null; }}><option value="celestrak">CelesTrak</option><option value="space-track">Space-Track{spaceTrackConfigured ? "" : " · needs setup"}</option></select></label>
       <label className="field"><span>Satellite group</span><select value={group} onChange={event => { setGroup(event.target.value); setSearchFullCatalog(false); fullCatalogPreviousSelection.current = null; }}>{GROUPS.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select></label>
@@ -388,35 +676,139 @@ export default function EarthGlobe() {
     {dataInfo?.warning && <p className="provider-note warning">{dataInfo.warning}{dataInfo.stale ? " The app will retry automatically in about five minutes." : ""}</p>}
     <div className="filter-row"><strong>Altitude filter <small>(km)</small></strong><label>Min <input type="number" min="0" value={minAlt} onChange={e => setMinAlt(e.target.value)}/></label><label>Max <input type="number" min="0" value={maxAlt} onChange={e => setMaxAlt(e.target.value)}/></label><label>Orbital paths <select value={pathLimit} onChange={e => setPathLimit(e.target.value)}><option value="25">25 max</option><option value="100">100 max</option><option value="250">250 max</option><option value="500">500 max</option><option value="all">All displayed (up to 2,500)</option></select></label><button className="link-button" onClick={() => { setSearch(""); setOrbitType("ALL"); setObjectTypeFilter("ALL"); setMinAlt("0"); setMaxAlt("40000"); }}>Reset filters</button></div>
     {error && <div className="error-panel"><b>{recordsRef.current.length ? "Could not update satellite data" : "Satellite data could not be loaded"}</b><p>{error}</p><p>{recordsRef.current.length ? `Tracking continues using the last successful ${dataInfo?.providerName || "provider"} data from ${dataInfo?.fetchedAt ? new Date(dataInfo.fetchedAt).toLocaleString() : "an earlier fetch"}.` : "The app will retry automatically in about five minutes. If the provider keeps rejecting requests, its access policy or the deployment network must allow the request before new orbital data can load."}</p><button className="button" disabled={isLoadingData} onClick={retry}>{isLoadingData ? "Updating…" : "Try update again"}</button></div>}
-    <div className="metrics-grid"><Metric label="Loaded satellites" value={satellites.length.toLocaleString()} sub={`${dataInfo?.providerName || "Selected provider"} ${dataInfo?.format || "orbital element"} records`}/><Metric label="Filtered results" value={filtered.length.toLocaleString()} sub="Current filters and search"/><Metric label="Orbital paths" value={paths.length.toLocaleString()} sub="100-minute prediction window"/><Metric label="Debris objects" value={objectCounts.debris.toLocaleString()} sub="In the loaded catalog"/><Metric label="Rocket bodies" value={objectCounts.rocketBodies.toLocaleString()} sub="In the loaded catalog"/><Metric label="Low-perigee debris" value={objectCounts.lowPerigeeDebris.toLocaleString()} sub="Perigee below 200 km; not a collision-risk estimate"/></div>
-    <div className="globe-layout"><div className="globe-panel"><div className="globe-panel-top"><span className="globe-legend"><i className="legend leo"/> LEO <i className="legend meo"/> MEO <i className="legend geo"/> GEO</span><span className="globe-source">{dataInfo ? `${dataInfo.providerName} · ${dataInfo.source}${dataInfo.stale ? " · stale cache" : ""}` : status}</span><div className="globe-actions"><button type="button" className="globe-control" onClick={() => setShowCityLabels(value => !value)} aria-pressed={showCityLabels}>{showCityLabels ? "Cities on" : "Cities off"}</button><button type="button" className="globe-control" onClick={resetGlobeView}>Global view</button></div></div><div className="globe-container" ref={host}/><div className="globe-foot">{status} · rendered marker cap: 2,500 · Day/night terminator · subsolar {fmt(solarPosition.lat)}°, {fmt(solarPosition.lng)}° · <a href="https://science.nasa.gov/earth/earth-observatory/blue-marble-next-generation/" target="_blank" rel="noreferrer">NASA Earth Observatory · Blue Marble Next Generation</a></div></div>
-    <aside className="telemetry-panel"><p className="eyebrow">OBJECT INSPECTOR</p><h3>Satellite telemetry</h3>{selected ? <><h2 className="selected-name">{selected.name}</h2><p className="muted">NORAD ID {selected.noradId}</p><span className="orbit-badge" style={{color:COLORS[selected.orbitType]}}>{selected.orbitType} ORBIT</span><div className="telemetry-grid"><Datum label="Latitude" value={`${fmt(selected.lat,3)}°`}/><Datum label="Longitude" value={`${fmt(selected.lng,3)}°`}/><Datum label="Position calculated (UTC)" value={selected.positionTimeUtc || "Not available"}/><Datum label="Altitude" value={`${fmt(selected.altitudeKm)} km`}/><Datum label="Speed" value={`${fmt(selected.speedKmS,3)} km/s`}/><Datum label="Inclination" value={`${fmt(selected.inclinationDeg,2)}°`}/><Datum label="Eccentricity" value={fmt(selected.eccentricity,5)}/><Datum label="Period" value={`${fmt(selected.periodMin)} min`}/><Datum label="Mean altitude" value={`${fmt(selected.meanAltitudeKm,0)} km`}/><Datum label="Perigee" value={`${fmt(selected.perigeeAltitudeKm,0)} km`}/><Datum label="Apogee" value={`${fmt(selected.apogeeAltitudeKm,0)} km`}/><Datum label="Object type" value={selected.omm?.OBJECT_TYPE || "Not provided"}/><Datum label="Country" value={selected.omm?.COUNTRY_CODE || "Not provided"}/><Datum label="Launch date" value={selected.omm?.LAUNCH_DATE || "Not provided"}/><Datum label="Element epoch" value={selected.elementEpoch ? new Date(selected.elementEpoch).toLocaleString() : "Not provided"}/><Datum label="Element age" value={selected.elementAgeHours === null ? "Unknown" : `${fmt(selected.elementAgeHours,1)} hours · ${selected.elementFreshness}`}/><Datum label="Propagation model" value={propagationModel === "fg" ? "F&G two-body" : "SGP4"}/></div><button className="button focus-button" onClick={() => globe.current?.pointOfView({lat:selected.lat,lng:selected.lng,altitude:1.5},800)}>Focus satellite</button><button className="button copy-coordinates" type="button" onClick={copyCoordinates}>Copy latitude, longitude</button>{coordinateCopyStatus && <p className="copy-status" role="status">{coordinateCopyStatus}</p>}</> : <div className="empty-selection"><div>◎</div><b>Select a satellite</b><p>Click a globe marker or use Inspect in the catalogue below.</p></div>}<PassPredictor selected={selected} algorithm={propagationModel}/><div className="source-box"><small>ORBITAL ELEMENT SOURCE</small><b><a href={provider === "space-track" ? "https://www.space-track.org/" : "https://celestrak.org/"} target="_blank" rel="noreferrer">{dataInfo?.providerName || (provider === "space-track" ? "Space-Track" : "CelesTrak")} ↗</a></b><span>{dataInfo?.fetchedAt ? `Retrieved ${new Date(dataInfo.fetchedAt).toLocaleString()}` : "No successful data fetch yet"}</span><span>{selected?.elementFreshness ? `Selected element status: ${selected.elementFreshness}` : "Element freshness appears when a satellite is selected"}</span>{dataInfo?.warning && <span className="warning">{dataInfo.warning}</span>}</div></aside></div>
+    <div className="metrics-grid"><Metric label="Loaded satellites" value={satellites.length.toLocaleString()} sub={`${dataInfo?.providerName || "Selected provider"} ${dataInfo?.format || "orbital element"} records`}/><Metric label="Filtered results" value={filtered.length.toLocaleString()} sub="Current filters and search"/><Metric label="Orbital paths" value={paths.length.toLocaleString()} sub="100-minute prediction window"/><Metric label="Rocket bodies" value={objectCounts.rocketBodies.toLocaleString()} sub="In the loaded catalog"/></div>
+    <section className="debris-monitor-panel" aria-labelledby="debris-monitor-title">
+      <div className="debris-monitor-header">
+        <div><p className="eyebrow">DEBRIS MONITORING</p><h3 id="debris-monitor-title">Orbital decay watch</h3></div>
+        <span>{dataInfo?.providerName || "Waiting for provider data"}{dataInfo?.fetchedAt ? ` · updated ${new Date(dataInfo.fetchedAt).toLocaleString()}` : ""}</span>
+      </div>
+      <div className="debris-monitor-stats">
+        <Metric label="Tracked debris" value={objectCounts.debris.toLocaleString()} sub="In the loaded catalog"/>
+        <Metric label="Below 200 km perigee" value={objectCounts.lowPerigeeDebris.toLocaleString()} sub="Low-altitude monitoring threshold"/>
+        <Metric label="Stale debris elements" value={objectCounts.staleDebris.toLocaleString()} sub="Orbital element age over 72 hours"/>
+      </div>
+      <div className="debris-watchlist">
+        <div className="debris-watchlist-heading"><b>Lowest-perigee debris</b><span>Up to 5 objects from the current catalog</span></div>
+        {objectCounts.watchlist.length
+          ? objectCounts.watchlist.map(item => <button className="debris-watch-item" key={item.noradId} type="button" onClick={() => focus(item)}>
+            <span><b>{item.name}</b><small>NORAD {item.noradId} · {item.elementFreshness} elements</small></span>
+            <strong>{fmt(item.perigeeAltitudeKm, 0)} km</strong>
+          </button>)
+          : <p className="debris-watch-empty">No debris objects are currently below the 200 km perigee threshold.</p>}
+      </div>
+      <div className="debris-monitor-footer">
+        <p>Perigee and element age are screening indicators only; they do not predict reentry or collision risk.</p>
+        <button className="button" type="button" disabled={!objectCounts.debris} onClick={() => {
+          setSearch("");
+          setOrbitType("ALL");
+          setMinAlt("0");
+          setMaxAlt("40000");
+          setObjectTypeFilter("DEBRIS");
+        }}>Review debris catalog</button>
+      </div>
+    </section>
+    <section className="ops-status-panel" aria-labelledby="ops-status-title">
+      <div className="debris-monitor-header">
+        <div><p className="eyebrow">LIVE DATA STATUS</p><h3 id="ops-status-title">Source and synchronization status</h3></div>
+        <span>Refreshes every 60 seconds · provider configuration is not a connectivity check</span>
+      </div>
+      <div className="ops-status-grid">
+        <div className={`ops-status-card${operationalStatusError ? " is-warning" : ""}`}>
+          <small>BACKEND API</small>
+          <b>{operationalStatusError ? "Unavailable" : operationalStatus ? "Responding" : "Checking…"}</b>
+          <span>{operationalStatusError || "HTTP health and cache metadata only"}</span>
+        </div>
+        <div className="ops-status-card">
+          <small>CELESTRAK</small>
+          <b>{formatCacheStatus("celestrak")}</b>
+          <span>{operationalStatus?.providers?.find(item => item.id === "celestrak")?.cachedGroups ?? 0} cached groups · upstream availability not inferred</span>
+        </div>
+        <div className={`ops-status-card${!spaceTrackConfigured ? " is-warning" : ""}`}>
+          <small>SPACE-TRACK</small>
+          <b>{formatCacheStatus("space-track")}</b>
+          <span>{spaceTrackConfigured ? "Server credentials configured; authentication is verified only by a successful data request." : "Credentials are not configured on the backend."}</span>
+        </div>
+        <div className="ops-status-card">
+          <small>LOADED PROVIDER/GROUP</small>
+          <b>{satellites.length.toLocaleString()} objects</b>
+          <span>{objectCounts.payloads.toLocaleString()} payloads · {objectCounts.rocketBodies.toLocaleString()} rocket bodies · {objectCounts.debris.toLocaleString()} debris</span>
+        </div>
+        <div className="ops-status-card">
+          <small>CURRENT ELEMENTS</small>
+          <b>{dataInfo?.providerName || "No provider data loaded"}</b>
+          <span>{dataInfo?.fetchedAt ? `Retrieved ${new Date(dataInfo.fetchedAt).toLocaleString()}${dataInfo.stale ? " · stale cache" : ""}` : "No successful fetch for the current view"}</span>
+        </div>
+      </div>
+      <p className="data-scope-note">LIVE DATA: provider orbital elements and source-published TIP records only. Derived positions and pass times are propagated estimates. No covariance-based collision probability, radar observation, impact location, or uncertainty region is shown unless a source supplies the required data.</p>
+    </section>
+    <section className="reentry-panel" aria-labelledby="reentry-title">
+      <div className="debris-monitor-header">
+        <div><p className="eyebrow">LIVE RE-ENTRY SOURCE</p><h3 id="reentry-title">Space-Track TIP predictions</h3></div>
+        <button className="button" type="button" onClick={loadReentries} disabled={isLoadingReentries || operationalStatus?.reentryTip?.configured === false}>
+          {isLoadingReentries ? "Requesting TIP data…" : reentryData ? "Refresh TIP data" : "Load TIP data"}
+        </button>
+      </div>
+      <p className="data-scope-note">This panel displays only predictions returned by Space-Track TIP. It does not derive re-entry forecasts from perigee and does not invent an uncertainty region.</p>
+      {operationalStatus?.reentryTip?.configured === false && <p className="provider-note warning">Space-Track credentials are not configured on the server. No TIP request was made.</p>}
+      {reentryError && <p className="provider-note warning" role="status">{reentryError}</p>}
+      {reentryData && <>
+        <p className="reentry-source-note" role="status">{reentryData.count} source records · {reentryData.source} · retrieved {new Date(reentryData.fetchedAt).toLocaleString()}{reentryData.stale ? " · stale cache" : ""}{reentryData.warning ? ` · ${reentryData.warning}` : ""}</p>
+        {reentryData.records.length > 0 ? <div className="reentry-records">
+          {reentryData.records.slice(0, 20).map(record => <article className="reentry-record" key={`${record.noradId}-${record.predictedDecay}`}>
+            <b>{record.name || `NORAD ${record.noradId}`}</b>
+            <span>NORAD {record.noradId} · predicted decay {new Date(record.predictedDecay).toLocaleString()}</span>
+            <small>{record.predictionWindow ? `Source window: ${record.predictionWindow}` : "Prediction window not provided"}{record.direction ? ` · ${record.direction}` : ""}{Number.isFinite(Number(record.latitude)) && Number.isFinite(Number(record.longitude)) ? ` · source coordinate ${Number(record.latitude).toFixed(2)}°, ${Number(record.longitude).toFixed(2)}°` : " · no source coordinate supplied"}</small>
+          </article>)}
+        </div> : <p className="debris-watch-empty">Space-Track returned no upcoming TIP records.</p>}
+      </>}
+    </section>
+    <div className="globe-layout"><div className="globe-panel"><div className="globe-panel-top"><span className="globe-legend"><i className="legend leo"/> LEO <i className="legend meo"/> MEO <i className="legend geo"/> GEO{selected && <><i className="legend" style={{ background: "#fff" }}/> SELECTED FULL ORBIT</>}</span><span className="globe-source">{dataInfo ? `${dataInfo.providerName} · ${dataInfo.source}${dataInfo.stale ? " · stale cache" : ""}` : status}</span><div className="globe-actions"><button type="button" className="globe-control" onClick={() => setShowCityLabels(value => !value)} aria-pressed={showCityLabels}>{showCityLabels ? "Cities on" : "Cities off"}</button><button type="button" className="globe-control" onClick={resetGlobeView}>Global view</button></div></div><div className="globe-container" ref={host}/><div className="globe-foot">{status} · rendered marker cap: 2,500 · {selected ? "White line: complete, closed 3D orbit (720 SGP4 samples) · anchored to Earth orientation now" : "Select a satellite to display its complete, closed orbital curve"} · Other satellites: short ground-track previews · Day/night terminator · subsolar {fmt(solarPosition.lat)}°, {fmt(solarPosition.lng)}° · <a href="https://science.nasa.gov/earth/earth-observatory/blue-marble-next-generation/" target="_blank" rel="noreferrer">NASA Earth Observatory · Blue Marble Next Generation</a></div></div>
+    <aside className="telemetry-panel"><p className="eyebrow">OBJECT INSPECTOR</p><h3>Satellite telemetry</h3>{selected ? <><h2 className="selected-name">{selected.name}</h2><p className="muted">NORAD ID {selected.noradId}</p><span className="orbit-badge" style={{color:COLORS[selected.orbitType]}}>{selected.orbitType} ORBIT</span><div className="telemetry-grid"><Datum label="Latitude" value={`${fmt(selected.lat,3)}°`}/><Datum label="Longitude" value={`${fmt(selected.lng,3)}°`}/><Datum label="Position calculated (UTC)" value={selected.positionTimeUtc || "Not available"}/><Datum label="Altitude" value={`${fmt(selected.altitudeKm)} km`}/><Datum label="Speed" value={`${fmt(selected.speedKmS,3)} km/s`}/><Datum label="Inclination" value={`${fmt(selected.inclinationDeg,2)}°`}/><Datum label="Eccentricity" value={fmt(selected.eccentricity,5)}/><Datum label="Period" value={`${fmt(selected.periodMin)} min`}/><Datum label="Mean altitude" value={`${fmt(selected.meanAltitudeKm,0)} km`}/><Datum label="Perigee" value={`${fmt(selected.perigeeAltitudeKm,0)} km`}/><Datum label="Apogee" value={`${fmt(selected.apogeeAltitudeKm,0)} km`}/><Datum label="Object type" value={selected.omm?.OBJECT_TYPE || "Not provided"}/><Datum label="Country" value={selected.omm?.COUNTRY_CODE || "Not provided"}/><Datum label="Launch date" value={selected.omm?.LAUNCH_DATE || "Not provided"}/><Datum label="Element epoch" value={selected.elementEpoch ? new Date(selected.elementEpoch).toLocaleString() : "Not provided"}/><Datum label="Element age" value={selected.elementAgeHours === null ? "Unknown" : `${fmt(selected.elementAgeHours,1)} hours · ${selected.elementFreshness}`}/><Datum label="Propagation model" value={propagationModel === "fg" ? "F&G two-body" : "SGP4"}/></div><button className="button focus-button" onClick={() => globe.current?.pointOfView({lat:selected.lat,lng:selected.lng,altitude:1.5},800)}>Focus satellite</button><button className="button copy-coordinates" type="button" onClick={copyCoordinates}>Copy latitude, longitude</button>{coordinateCopyStatus && <p className="copy-status" role="status">{coordinateCopyStatus}</p>}</> : <div className="empty-selection"><div>◎</div><b>Select a satellite</b><p>Click a globe marker or use Inspect in the catalogue below.</p></div>}<PassPredictor selected={selected} satellites={satellites} onSelectSatellite={focus} algorithm={propagationModel} providerName={dataInfo?.providerName || (provider === "space-track" ? "Space-Track" : "CelesTrak")}/><div className="source-box"><small>ORBITAL ELEMENT SOURCE</small><b><a href={provider === "space-track" ? "https://www.space-track.org/" : "https://celestrak.org/"} target="_blank" rel="noreferrer">{dataInfo?.providerName || (provider === "space-track" ? "Space-Track" : "CelesTrak")} ↗</a></b><span>{dataInfo?.fetchedAt ? `Retrieved ${new Date(dataInfo.fetchedAt).toLocaleString()}` : "No successful data fetch yet"}</span><span>{selected?.elementFreshness ? `Selected element status: ${selected.elementFreshness}` : "Element freshness appears when a satellite is selected"}</span>{dataInfo?.warning && <span className="warning">{dataInfo.warning}</span>}</div></aside></div>
     <div className="table-panel"><div className="table-header"><div><p className="eyebrow">CATALOG BROWSER</p><h3>Satellite catalogue</h3></div><span>Showing {Math.min(visibleRows,sortedFiltered.length).toLocaleString()} of {sortedFiltered.length.toLocaleString()}</span></div><div className="table-scroll"><table><thead><tr>{[["name","Name"],["noradId","NORAD ID"],["objectType","Object type"],["orbitType","Orbit"],["altitudeKm","Altitude km"],["elementAgeHours","Element age"],["lat","Latitude"],["lng","Longitude"]].map(([key,label]) => sortHeader(key,label))}<th scope="col">Inspect</th></tr></thead><tbody>{sortedFiltered.slice(0,visibleRows).map(s => <tr key={s.noradId} className={selectedId===s.noradId?"selected-row":""}><td className="sat-name">{s.name}</td><td>{s.noradId}</td><td>{s.omm?.OBJECT_TYPE || "—"}</td><td style={{color:COLORS[s.orbitType]}}>{s.orbitType}</td><td>{fmt(s.altitudeKm)}</td><td>{s.elementAgeHours === null ? "—" : `${fmt(s.elementAgeHours,1)} h · ${s.elementFreshness}`}</td><td>{fmt(s.lat,3)}°</td><td>{fmt(s.lng,3)}°</td><td><button className="link-button" onClick={() => focus(s)}>Inspect ↗</button></td></tr>)}{!sortedFiltered.length && <tr><td colSpan="9" className="empty-table">{searchQuery ? "No satellites match this search and the selected filters." : "No satellites match the selected filters or data has not loaded."}</td></tr>}</tbody></table></div>{visibleRows < sortedFiltered.length && <div className="table-more"><button className="button" onClick={() => setVisibleRows(count => Math.min(count + 100, sortedFiltered.length))}>Show 100 more results</button></div>}</div>
     <p className="disclaimer">{propagationModel === "fg" ? "F&G mode uses a two-body universal-variable model seeded from the Space-Track element epoch. It omits drag, Earth oblateness, and third-body perturbations; use SGP4 for standard TLE/OMM tracking." : "Positions are estimates from publicly available GP orbital data propagated using SGP4."} Large groups may be slow. Not a certified navigation, collision-avoidance, or operational tracking system.</p>
   </section>;
 }
 function Metric({label,value,sub}) { return <div className="metric-card"><span>{label}</span><b>{value}</b><small>{sub}</small></div>; }
 function Datum({label,value}) { return <div className="datum"><small>{label}</small><b>{value}</b></div>; }
-function PassPredictor({ selected, algorithm }) {
+function PassPredictor({ selected, satellites, onSelectSatellite, algorithm, providerName }) {
+  const catalogIdentity = useMemo(() => satellites.map(satellite => satellite.noradId).join(","), [satellites]);
   const [latitude, setLatitude] = useState("");
   const [longitude, setLongitude] = useState("");
+  const [locationAccuracyMeters, setLocationAccuracyMeters] = useState(null);
+  const [locationCapturedAt, setLocationCapturedAt] = useState(null);
   const [minimumElevation, setMinimumElevation] = useState("10");
+  const [predictionHours, setPredictionHours] = useState("24");
   const [passes, setPasses] = useState([]);
   const [isCalculating, setIsCalculating] = useState(false);
   const [alertsEnabled, setAlertsEnabled] = useState(false);
   const [message, setMessage] = useState("");
+  const [catalogPasses, setCatalogPasses] = useState([]);
+  const [catalogScanStatus, setCatalogScanStatus] = useState("");
+  const [catalogScanProgress, setCatalogScanProgress] = useState(null);
+  const [isScanningCatalog, setIsScanningCatalog] = useState(false);
+  const catalogWorker = useRef(null);
+  const catalogFetchController = useRef(null);
+
+  const invalidatePrediction = () => {
+    setPasses([]);
+    setAlertsEnabled(false);
+    setMessage("");
+  };
 
   const useMyLocation = () => {
     if (!navigator.geolocation) {
-      setMessage("Location is not supported by this browser. You can enter coordinates manually.");
+      setMessage("Device location is not supported by this browser. Enter coordinates manually.");
       return;
     }
-    setMessage("Requesting location permission…");
+    setMessage("Requesting a high-accuracy device location. This needs HTTPS (or localhost); allow access when your browser asks…");
     navigator.geolocation.getCurrentPosition(
-      ({ coords }) => {
+      ({ coords, timestamp }) => {
         setLatitude(coords.latitude.toFixed(5));
         setLongitude(coords.longitude.toFixed(5));
-        setMessage("Observer coordinates set in this browser only.");
+        setLocationAccuracyMeters(Number.isFinite(coords.accuracy) ? coords.accuracy : null);
+        setLocationCapturedAt(new Date(timestamp));
+        invalidatePrediction();
+        setMessage("Device location set. It stays in this page and is not sent to the satellite API.");
       },
       error => {
         const reason = error.code === error.PERMISSION_DENIED
@@ -426,7 +818,7 @@ function PassPredictor({ selected, algorithm }) {
             : "Current location is unavailable.";
         setMessage(`${reason} You can enter coordinates manually.`);
       },
-      { enableHighAccuracy: false, maximumAge: 60_000, timeout: 10_000 }
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 20_000 }
     );
   };
 
@@ -435,6 +827,22 @@ function PassPredictor({ selected, algorithm }) {
     setAlertsEnabled(false);
     setMessage("");
   }, [selected?.noradId, algorithm]);
+
+  useEffect(() => () => {
+    catalogFetchController.current?.abort();
+    catalogWorker.current?.terminate();
+  }, []);
+
+  useEffect(() => {
+    catalogFetchController.current?.abort();
+    catalogWorker.current?.terminate();
+    catalogFetchController.current = null;
+    catalogWorker.current = null;
+    setCatalogPasses([]);
+    setCatalogScanStatus("");
+    setCatalogScanProgress(null);
+    setIsScanningCatalog(false);
+  }, [algorithm, catalogIdentity]);
 
   useEffect(() => {
     if (!alertsEnabled || !passes.length || typeof Notification === "undefined" || Notification.permission !== "granted") return undefined;
@@ -463,9 +871,9 @@ function PassPredictor({ selected, algorithm }) {
     setIsCalculating(true);
     window.setTimeout(() => {
       try {
-        const results = calculatePasses(selected.satrec, { latitude: lat, longitude: lng }, new Date(), 24, mask, algorithm, selected.elementEpoch);
+        const results = calculatePasses(selected.satrec, { latitude: lat, longitude: lng }, new Date(), Number(predictionHours), mask, algorithm, selected.elementEpoch, 10);
         setPasses(results);
-        if (!results.length) setMessage("No passes above this elevation mask in the next 24 hours.");
+        if (!results.length) setMessage(`No passes above this elevation mask in the next ${predictionHours} hours.`);
       } catch (error) {
         setPasses([]);
         setMessage(`Pass prediction failed: ${error.message}`);
@@ -473,6 +881,114 @@ function PassPredictor({ selected, algorithm }) {
         setIsCalculating(false);
       }
     }, 0);
+  };
+
+  const scanCatalog = async () => {
+    const lat = Number(latitude), lng = Number(longitude), mask = Number(minimumElevation);
+    if (!latitude.trim() || !longitude.trim() || !Number.isFinite(lat) || lat < -90 || lat > 90 || !Number.isFinite(lng) || lng < -180 || lng > 180) {
+      setMessage("Enter a valid location or use device location before scanning the catalog.");
+      return;
+    }
+    catalogFetchController.current?.abort();
+    catalogWorker.current?.terminate();
+    setCatalogPasses([]);
+    setCatalogScanStatus("Fetching CelesTrak and Space-Track records for the selected group…");
+    setCatalogScanProgress(null);
+    setIsScanningCatalog(true);
+    setMessage("");
+
+    try {
+      const controller = new AbortController();
+      catalogFetchController.current = controller;
+      const providers = ["celestrak", "space-track"];
+      const sourceResults = await Promise.allSettled(
+        providers.map(source => fetchSatelliteRecords(group, controller.signal, source))
+      );
+      if (controller.signal.aborted) return;
+
+      const successfulSources = [];
+      const sourceErrors = [];
+      const recordsByNorad = new Map();
+      sourceResults.forEach((result, index) => {
+        const source = providers[index];
+        if (result.status === "rejected") {
+          sourceErrors.push(`${source === "celestrak" ? "CelesTrak" : "Space-Track"}: ${result.reason?.message || "unavailable"}`);
+          return;
+        }
+        successfulSources.push(result.value.providerName || (source === "celestrak" ? "CelesTrak" : "Space-Track"));
+        for (const record of result.value.satellites || []) {
+          const noradId = String(record.noradId || "");
+          if (!noradId) continue;
+          const candidate = { ...record, passSource: result.value.providerName || (source === "celestrak" ? "CelesTrak" : "Space-Track") };
+          const current = recordsByNorad.get(noradId);
+          const candidateEpoch = Date.parse(candidate.elementEpoch || candidate.omm?.EPOCH || "") || 0;
+          const currentEpoch = current ? Date.parse(current.elementEpoch || current.omm?.EPOCH || "") || 0 : -1;
+          if (!current || candidateEpoch > currentEpoch) recordsByNorad.set(noradId, candidate);
+        }
+      });
+      const records = [...recordsByNorad.values()];
+      if (!records.length) {
+        throw new Error(sourceErrors.length ? sourceErrors.join(" · ") : "Neither provider returned usable satellite records.");
+      }
+
+      setCatalogScanStatus(`Scanning ${records.length.toLocaleString()} unique satellites from ${successfulSources.join(" + ")}…`);
+      setCatalogScanProgress({ completed: 0, total: records.length, failedRecords: 0 });
+      const worker = new Worker(new URL("./passWorker.js", import.meta.url), { type: "module" });
+      catalogWorker.current = worker;
+      worker.onmessage = event => {
+        if (event.data.type === "progress") {
+          setCatalogScanProgress({
+            completed: event.data.completed,
+            total: event.data.total,
+            failedRecords: event.data.failedRecords
+          });
+          return;
+        }
+        if (event.data.type === "complete") {
+          setCatalogPasses(event.data.results);
+          const resultSummary = event.data.results.length
+            ? `Found ${event.data.results.length} passes for ${new Set(event.data.results.map(pass => pass.noradId)).size} satellites from ${successfulSources.join(" + ")}.`
+            : `No passes found in ${predictionHours} hours for ${successfulSources.join(" + ")}.`;
+          setCatalogScanStatus(`${resultSummary}${sourceErrors.length ? ` Source unavailable: ${sourceErrors.join(" · ")}` : ""}`);
+          setCatalogScanProgress({ completed: records.length, total: records.length, failedRecords: event.data.failedRecords });
+          setIsScanningCatalog(false);
+          worker.terminate();
+          catalogWorker.current = null;
+          catalogFetchController.current = null;
+        }
+      };
+      worker.onerror = event => {
+        setCatalogScanStatus(`Catalog scan failed: ${event.message || "Worker error"}`);
+        setIsScanningCatalog(false);
+        worker.terminate();
+        catalogWorker.current = null;
+        catalogFetchController.current = null;
+      };
+      worker.postMessage({
+        records: records.map(({ noradId, name, omm, line1, line2, elementEpoch, passSource }) => ({ noradId, name, omm, line1, line2, elementEpoch, passSource })),
+        latitude: lat,
+        longitude: lng,
+        durationHours: Number(predictionHours),
+        minimumElevationDeg: mask,
+        algorithm,
+        startedAt: new Date().toISOString()
+      });
+    } catch (error) {
+      if (error.name === "AbortError") return;
+      setCatalogScanStatus(`Could not start the catalog scan: ${error.message}`);
+      setIsScanningCatalog(false);
+      catalogWorker.current?.terminate();
+      catalogWorker.current = null;
+      catalogFetchController.current = null;
+    }
+  };
+  const cancelCatalogScan = () => {
+    catalogFetchController.current?.abort();
+    catalogFetchController.current = null;
+    catalogWorker.current?.terminate();
+    catalogWorker.current = null;
+    setIsScanningCatalog(false);
+    setCatalogScanStatus("Catalog scan canceled.");
   };
 
   const enableAlerts = async () => {
@@ -502,27 +1018,79 @@ function PassPredictor({ selected, algorithm }) {
     setAlertsEnabled(true);
   };
 
+  const formatAzimuth = degrees => {
+    if (!Number.isFinite(degrees)) return "—";
+    const compass = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][Math.round(degrees / 45) % 8];
+    return `${degrees.toFixed(0)}° ${compass}`;
+  };
+  const formatPassTime = date => date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
   return <section className="pass-predictor">
     <p className="eyebrow">LOCAL PASS PREDICTION</p>
     <h4>Upcoming passes</h4>
-    <p className="pass-location-note">Enter observer coordinates. They stay in this browser and are not sent to the server.</p>
-    <button className="button location-button" type="button" onClick={useMyLocation}>Use my current location</button>
+    <p className="pass-location-note">Use a one-time device location (GPS/GNSS when available) or enter coordinates. The browser may use other location signals; coordinates stay in this page and are not sent to our API.</p>
+    <button className="button location-button" type="button" onClick={useMyLocation}>Use device location · GPS if available</button>
+    {locationCapturedAt && <p className="pass-location-fix" role="status">
+      Location fix {locationAccuracyMeters === null ? "" : `±${Math.round(locationAccuracyMeters).toLocaleString()} m · `}
+      {locationCapturedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+    </p>}
     <div className="pass-location-fields">
-      <label>Latitude<input aria-label="Observer latitude" inputMode="decimal" type="number" min="-90" max="90" step="any" value={latitude} onChange={event => setLatitude(event.target.value)} placeholder="e.g. 13.08"/></label>
-      <label>Longitude<input aria-label="Observer longitude" inputMode="decimal" type="number" min="-180" max="180" step="any" value={longitude} onChange={event => setLongitude(event.target.value)} placeholder="e.g. 80.27"/></label>
-      <label>Min. elevation<select aria-label="Minimum pass elevation" value={minimumElevation} onChange={event => setMinimumElevation(event.target.value)}><option value="0">0°</option><option value="5">5°</option><option value="10">10°</option><option value="20">20°</option></select></label>
+      <label>Latitude<input aria-label="Observer latitude" inputMode="decimal" type="number" min="-90" max="90" step="any" value={latitude} onChange={event => { setLatitude(event.target.value); setLocationAccuracyMeters(null); setLocationCapturedAt(null); invalidatePrediction(); }} placeholder="e.g. 13.08"/></label>
+      <label>Longitude<input aria-label="Observer longitude" inputMode="decimal" type="number" min="-180" max="180" step="any" value={longitude} onChange={event => { setLongitude(event.target.value); setLocationAccuracyMeters(null); setLocationCapturedAt(null); invalidatePrediction(); }} placeholder="e.g. 80.27"/></label>
+      <label>Min. elevation<select aria-label="Minimum pass elevation" value={minimumElevation} onChange={event => { setMinimumElevation(event.target.value); invalidatePrediction(); }}><option value="0">0°</option><option value="5">5°</option><option value="10">10°</option><option value="20">20°</option></select></label>
+      <label>Forecast period<select aria-label="Pass forecast period" value={predictionHours} onChange={event => { setPredictionHours(event.target.value); invalidatePrediction(); }}><option value="24">24 hours</option><option value="48">48 hours</option></select></label>
     </div>
     <div className="pass-actions">
-      <button className="button" type="button" disabled={!selected || isCalculating} onClick={predict}>{isCalculating ? "Calculating…" : "Predict next 24 hours"}</button>
+      <button className="button" type="button" disabled={!selected || isCalculating} onClick={predict}>{isCalculating ? "Calculating…" : `Predict next ${predictionHours} hours`}</button>
       <button className="button" type="button" disabled={!passes.length || alertsEnabled} onClick={enableAlerts}>{alertsEnabled ? "Alert enabled" : "Enable browser alert"}</button>
     </div>
     {message && <p className="pass-message" role="status">{message}</p>}
     {passes.length > 0 && <div className="pass-results" aria-live="polite">
-      {passes.slice(0, 6).map((pass, index) => <div className="pass-result" key={`${pass.aos.toISOString()}-${index}`}>
-        <b>{pass.ongoing ? "In progress" : pass.aos.toLocaleString()}</b>
-        <span>Peak {pass.maxElevationDeg.toFixed(1)}° · ends {pass.los.toLocaleTimeString()}</span>
-      </div>)}
-      <small>Approximate geometric visibility from current orbital elements; atmosphere, terrain, and sunlight are not included.</small>
+      {passes.slice(0, 8).map((pass, index) => <article className="pass-result" key={`${pass.aos.toISOString()}-${index}`}>
+        <b>{pass.ongoing ? "In progress" : pass.aos.toLocaleDateString()} · AOS {formatPassTime(pass.aos)}</b>
+        <div className="pass-detail-grid">
+          <span><small>AOS direction</small><strong>{formatAzimuth(pass.aosAzimuthDeg)}</strong></span>
+          <span><small>Peak elevation</small><strong>{pass.maxElevationDeg.toFixed(1)}°{pass.ongoing ? " so far" : ""}</strong></span>
+          <span><small>{pass.ongoing ? "Peak direction so far" : "Peak time"}</small><strong>{pass.ongoing ? formatAzimuth(pass.tcaAzimuthDeg) : formatPassTime(pass.tca)}</strong></span>
+          <span><small>Peak range</small><strong>{Number.isFinite(pass.rangeAtTcaKm) ? `${Math.round(pass.rangeAtTcaKm).toLocaleString()} km` : "—"}</strong></span>
+          {!pass.ongoing && <span><small>Duration</small><strong>{Math.round(pass.durationMinutes)} min</strong></span>}
+          <span><small>LOS direction</small><strong>{pass.ongoing ? "Beyond forecast" : formatAzimuth(pass.losAzimuthDeg)}</strong></span>
+        </div>
+        {!pass.ongoing && <span className="pass-los">LOS {formatPassTime(pass.los)}</span>}
+      </article>)}
+      <small>Times use this device’s local time. Predictions use {providerName} orbital elements with {algorithm === "fg" ? "the experimental two-body model" : "SGP4"}. Event crossings are numerically refined to 0.25 seconds; this is not a guarantee of real-world timing accuracy, which depends on element age and orbit quality. Terrain, refraction, sunlight, and clouds are not included.</small>
     </div>}
+    <div className="catalog-pass-finder">
+      <div className="catalog-pass-heading"><b>Find passes using both orbital sources</b><small>CelesTrak + Space-Track · duplicate satellites use the newest element epoch</small></div>
+      <p className="pass-location-note">Scans the selected group at your observer location using both providers. Results are ordered by rise time; select any pass to inspect the satellite. The catalog scan uses 60-second sampling, then refines detected crossings to 0.25 seconds. If Space-Track is not configured or a provider is unavailable, the other provider is still used.</p>
+      <div className="pass-actions">
+        <button className="button" type="button" disabled={isScanningCatalog} onClick={scanCatalog}>
+          {isScanningCatalog ? "Scanning both sources…" : "Scan CelesTrak + Space-Track"}
+        </button>
+        {isScanningCatalog && <button className="button" type="button" onClick={cancelCatalogScan}>Cancel scan</button>}
+      </div>
+      {catalogScanProgress && <div className="catalog-scan-progress" role="status">
+        <progress value={catalogScanProgress.completed} max={catalogScanProgress.total}/>
+        <span>{catalogScanProgress.completed.toLocaleString()} / {catalogScanProgress.total.toLocaleString()} checked</span>
+      </div>}
+      {catalogScanStatus && <p className="pass-message" role="status">{catalogScanStatus}{catalogScanProgress?.failedRecords ? ` ${catalogScanProgress.failedRecords} invalid or uncalculable records skipped.` : ""}</p>}
+      {catalogPasses.length > 0 && <div className="catalog-pass-results" aria-live="polite">
+        {catalogPasses.slice(0, 30).map((pass, index) => <article className="catalog-pass-result" key={`${pass.noradId}-${pass.aos.toISOString()}-${index}`}>
+          <div className="catalog-pass-result-heading"><b>{pass.name}</b><small>{pass.source} · NORAD {pass.noradId}</small></div>
+          <div className="pass-detail-grid">
+            <span><small>AOS · rise</small><strong>{pass.aos.toLocaleString()} · {formatAzimuth(pass.aosAzimuthDeg)}</strong></span>
+            <span><small>Peak · local time</small><strong>{pass.tca.toLocaleTimeString()}</strong></span>
+            <span><small>Peak · elevation / azimuth</small><strong>{pass.maxElevationDeg.toFixed(1)}° · {formatAzimuth(pass.tcaAzimuthDeg)}</strong></span>
+            <span><small>Peak slant range</small><strong>{Number.isFinite(pass.rangeAtTcaKm) ? `${Math.round(pass.rangeAtTcaKm).toLocaleString()} km` : "—"}</strong></span>
+            <span><small>LOS · set</small><strong>{pass.ongoing ? "Beyond forecast" : `${pass.los.toLocaleString()} · ${formatAzimuth(pass.losAzimuthDeg)}`}</strong></span>
+            <span><small>Visible duration</small><strong>{pass.ongoing ? "In progress" : `${Math.round(pass.durationMinutes)} min`}</strong></span>
+          </div>
+          {satellites.some(satellite => satellite.noradId === pass.noradId)
+            ? <button className="link-button" type="button" onClick={() => onSelectSatellite(satellites.find(satellite => satellite.noradId === pass.noradId))}>Inspect satellite ↗</button>
+            : <small className="catalog-pass-unavailable">This satellite is not in the currently displayed provider catalog; its pass details above are from {pass.source}.</small>}
+        </article>)}
+        {catalogPasses.length > 30 && <small>Showing the next 30 of {catalogPasses.length} predicted passes.</small>}
+      </div>}
+    </div>
   </section>;
 }
